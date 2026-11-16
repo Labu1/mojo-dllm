@@ -7,7 +7,7 @@ import sys
 
 import pytest
 
-np = pytest.importorskip("numpy")
+np = pytest.importorskip("numpy", reason="numpy is in the `fixtures` group, not the `test` group; CI runs this file there")
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "bench"))
 spec = importlib.util.spec_from_file_location("compare_dg_traces", ROOT / "bench/compare_dg_traces.py")
@@ -129,6 +129,58 @@ def test_compare_distinguishes_signed_zero_bits(tmp_path, monkeypatch):
     result, = traces.compare(unified, cached, prompt=1)
     assert result["bit_equal"] is False
     assert result["max_abs_diff"] == 0
+
+
+@pytest.mark.parametrize("name", ["result_norm", "result_output"])
+def test_compare_uses_only_canvas_rows_for_result_tensors(tmp_path, monkeypatch, name):
+    values = np.arange(1, 17, dtype="<f4").reshape(1, 1, 2, 8)
+    unified, cached = tmp_path / "unified", tmp_path / "cached"
+    monkeypatch.setattr(traces, "load", lambda folder: {
+        ("unified", name): (dict(ne=[8, 2, 1, 1]), values),
+    } if folder == unified else {
+        ("prefill", name): (dict(ne=[8, 1, 1, 1]), values[:, :, :1]),
+        ("decode", name): (dict(ne=[8, 2, 1, 1]), values * 2),
+    })
+    result, = traces.compare(unified, cached, prompt=1)
+    assert result["phase"] == "decode"
+    assert result["rows"] == 2
+    assert result["max_rel_rms"] == pytest.approx(1)
+    assert result["top1_max_rel_err"] == pytest.approx(1)
+
+
+def test_compare_rejects_a_non_unified_source_phase(tmp_path, monkeypatch):
+    values = np.ones((1, 1, 2, 8), dtype="<f4")
+    monkeypatch.setattr(traces, "load", lambda folder: {
+        ("decode", "l_out-0"): (dict(ne=[8, 2, 1, 1]), values),
+    })
+    with pytest.raises(ValueError, match="expected unified phase, found decode"):
+        traces.compare(tmp_path / "unified", tmp_path / "cached", prompt=1)
+
+
+def test_compare_rejects_traces_without_matching_names(tmp_path, monkeypatch):
+    unified, cached = tmp_path / "unified", tmp_path / "cached"
+    values = np.ones((1, 1, 2, 8), dtype="<f4")
+    monkeypatch.setattr(traces, "load", lambda folder: {
+        ("unified", "Qcur-0") if folder == unified else ("decode", "Kcur-0"):
+            (dict(ne=[8, 2, 1, 1]), values),
+    })
+    with pytest.raises(ValueError, match="no matching tensor names"):
+        traces.compare(unified, cached, prompt=1)
+
+
+def test_rejects_multiple_changed_decode_dimensions():
+    with pytest.raises(ValueError, match="multiple dimensions differ"):
+        traces.align(np.ones((1, 2, 3, 8)), np.ones((1, 1, 2, 8)), "decode", 1)
+
+
+def test_rejects_a_prefill_slice_larger_than_the_unified_tensor():
+    with pytest.raises(ValueError, match="cannot align prefill"):
+        traces.align(np.ones((1, 1, 2, 8)), np.ones((1, 1, 3, 8)), "prefill", 3)
+
+
+def test_rejects_different_ranks_after_alignment():
+    with pytest.raises(ValueError, match="aligned shapes differ"):
+        traces.align(np.ones((1, 2, 8)), np.ones((1, 2, 8, 1)), "decode", 1)
 
 
 def test_rejects_a_prefill_dimension_that_is_not_the_prompt():

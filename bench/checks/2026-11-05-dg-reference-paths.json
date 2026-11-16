@@ -3620,6 +3620,6 @@
       "mechanism": "SIMD-width vector exponential/block reduction versus scalar exponential/individual accumulation"
     }
   ],
-  "historical_compiler_flags": "The issue reports the old boundary pattern without compiler flags. The AVX2/FMA width-eight source branch corresponds to that pattern.",
+  "historical_compiler_flags": "#163 reports the old boundary pattern without compiler flags. The AVX2/FMA width-eight source branch is a hypothesis for that pattern; these measurements use AVX512F/DQ.",
   "reference_source_manifest": "2026-11-05-dg-reference-source.json"
 }

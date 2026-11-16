@@ -612,8 +612,10 @@
     "native": "DG_REF=/absolute/path/dg_ref DG_MATMUL=/absolute/path/dg_matmul python -m pytest -q tests/python/test_dg_native_diagnostics.py"
   },
   "detailed_logs": {
+    "storage": "Local archive; these paths are outside the repository",
     "local": "phase3/issue163-mutations/{initial,final}/",
     "native": "phase3/issue163-native/"
   },
-  "local_python": "3.12.14"
+  "local_python": "3.12.14",
+  "follow_up_record": "2026-11-16-dg-diagnostic-mutations.json"
 }

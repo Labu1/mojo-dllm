@@ -6,7 +6,7 @@ import subprocess
 
 import pytest
 
-np = pytest.importorskip("numpy")
+np = pytest.importorskip("numpy", reason="numpy is in the `fixtures` group, not the `test` group; native checks also need DG_REF or DG_MATMUL")
 
 
 def native_tool(variable):

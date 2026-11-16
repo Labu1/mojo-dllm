@@ -16,7 +16,7 @@ from types import ModuleType, SimpleNamespace
 
 import pytest
 
-np = pytest.importorskip("numpy")
+np = pytest.importorskip("numpy", reason="numpy is in the `fixtures` group, not the `test` group; CI runs this file there")
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "bench"))
 
@@ -91,6 +91,9 @@ def test_projection_reports_quantized_oracle_and_boundary_differences(tmp_path, 
         assert comparisons["unified", "q8_k_inputs"]["max_abs_diff"] == 0
         assert comparisons["cached", "q8_k_inputs"]["max_abs_diff"] == 0.25
         assert comparisons["unified", "plain_f32_inputs"]["max_abs_diff"] == 1.5
+        assert comparisons["cached", "q8_k_inputs"]["rms_diff"] == pytest.approx(0.25 / math.sqrt(5 * hidden))
+        assert comparisons["cached", "q8_k_inputs"]["max_rel_rms"] == pytest.approx(
+            0.25 / math.sqrt(127 ** 2 + 254 ** 2 + 2 ** 2 + 9 ** 2))
 
 
 def test_matmul_reports_replay_mismatch_and_honors_no_repack(tmp_path, monkeypatch):
@@ -107,6 +110,7 @@ def test_matmul_reports_replay_mismatch_and_honors_no_repack(tmp_path, monkeypat
 
     def run_product(command, **kwargs):
         calls.append(command)
+        assert command[8] == "1"
         k, n, rows = int(command[2]), int(command[3]), int(command[6])
         w = np.fromfile(command[4], dtype="<f4").reshape(n, k)
         x = np.fromfile(command[5], dtype="<f4").reshape(rows, k)
@@ -154,7 +158,7 @@ def test_softmax_reports_f64_error_and_replay_mismatch(tmp_path, monkeypatch):
     unified = np.zeros_like(scores)
     unified[:, :prompt, :prompt] = expected
     cached = expected.copy()
-    cached[0, 0, 0] += 0.125
+    cached.view(np.uint32)[0, 0, 0] += 1
     write_trace(tmp_path / "unified", {"unified": {
         "kq-0": scores[None], "kq_soft_max-0": unified[None],
     }})
@@ -168,6 +172,10 @@ def test_softmax_reports_f64_error_and_replay_mismatch(tmp_path, monkeypatch):
     results = json.loads(output.read_text())["results"]
     assert [r["key_length"] for r in results] == [8, 16, 24, 32]
     assert all(r["max_abs_from_f64"] < 1e-7 for r in results)
+    oracle = causal_softmax(scores[:, :prompt, :prompt].astype(np.float64))
+    rms = math.sqrt(math.fsum(float(x) ** 2 for x in (expected - oracle).flat) / expected.size)
+    assert rms > 0
+    assert all(r["rms_from_f64"] == pytest.approx(rms) for r in results)
     assert results[0]["replay_bit_equal"] is False
     assert results[2]["replay_bit_equal"] is True
 
@@ -237,6 +245,7 @@ def test_tiny_paths_executes_both_paths_and_reports_one_ulp_difference(tmp_path,
 
     def run_reference(command, **kwargs):
         commands.append(command)
+        assert command[6] == "1"
         values = np.tile(np.arange(1, 9, dtype="<f4"), (4, 1))
         if "--cached" in command:
             values.view(np.uint32)[0, 0] += 1
@@ -265,8 +274,28 @@ def test_tiny_paths_executes_both_paths_and_reports_one_ulp_difference(tmp_path,
     assert writes[0][1].dtype == np.float32
 
 
+@pytest.mark.parametrize("checker", [matmul, tiny_paths])
+def test_existing_output_directory_preserves_its_contents(tmp_path, monkeypatch, checker):
+    install_gguf_double(monkeypatch, [])
+    sys.modules["gguf"].GGUFWriter = object
+    sys.modules["gguf"].GGUFValueType = object
+    output = tmp_path / "existing"
+    output.mkdir()
+    marker = output / "measurement.json"
+    marker.write_text("previous measurement\n")
+    monkeypatch.setattr(checker.subprocess, "run", lambda *args, **kwargs: pytest.fail("reference must not run"))
+    arguments = (["model.gguf", "trace", "--matmul", "dg_matmul"] if checker is matmul
+                 else ["--ref", "dg_ref"])
+    monkeypatch.setattr(sys, "argv", ["checker.py", *arguments, "--out-dir", str(output)])
+    with pytest.raises(FileExistsError):
+        checker.main()
+    assert marker.read_text() == "previous measurement\n"
+    assert list(output.iterdir()) == [marker]
+
+
 def softmax_with_recorded_api(compute_status=0):
     uploads, tensor_shapes = {}, {}
+    calls = {"softmax": [], "threads": []}
     tensor_ids = iter([10, 11])
 
     def new_tensor(context, kind, keys, queries, heads, batch):
@@ -283,9 +312,9 @@ def softmax_with_recorded_api(compute_status=0):
 
     api = SimpleNamespace(
         ggml_init=lambda params: 1, ggml_new_tensor_4d=new_tensor,
-        ggml_soft_max_ext=lambda *args: 12, ggml_new_graph=lambda context: 2,
+        ggml_soft_max_ext=lambda *args: calls["softmax"].append(args) or 12, ggml_new_graph=lambda context: 2,
         ggml_build_forward_expand=lambda *args: None, ggml_backend_cpu_init=lambda: 3,
-        ggml_backend_cpu_set_n_threads=lambda *args: None,
+        ggml_backend_cpu_set_n_threads=lambda *args: calls["threads"].append(args),
         ggml_backend_alloc_ctx_tensors=lambda *args: 4,
         ggml_backend_tensor_set=upload, ggml_backend_tensor_get=download,
         ggml_backend_graph_compute=lambda *args: compute_status,
@@ -294,11 +323,11 @@ def softmax_with_recorded_api(compute_status=0):
     )
     kernel = softmax.Softmax.__new__(softmax.Softmax)
     kernel.api = api
-    return kernel, uploads, tensor_shapes
+    return kernel, uploads, tensor_shapes, calls
 
 
 def test_softmax_uploads_causal_mask_and_masked_padding():
-    kernel, uploads, shapes = softmax_with_recorded_api()
+    kernel, uploads, shapes, calls = softmax_with_recorded_api()
     scores = np.arange(18, dtype=np.float32).reshape(2, 3, 3)
     output = kernel.run(scores, 16)
     assert shapes == {10: (1, 2, 3, 16), 11: (1, 1, 3, 16)}
@@ -312,9 +341,10 @@ def test_softmax_uploads_causal_mask_and_masked_padding():
     expected[2, :3] = 0
     np.testing.assert_array_equal(mask, expected)
     assert output.shape == (2, 3, 3)
+    assert calls == {"softmax": [(1, 10, 11, 1, 0)], "threads": [(3, 1)]}
 
 
 def test_softmax_propagates_backend_compute_failure():
-    kernel, _, _ = softmax_with_recorded_api(compute_status=7)
+    kernel, _, _, _ = softmax_with_recorded_api(compute_status=7)
     with pytest.raises(RuntimeError, match="isolated CPU softmax failed"):
         kernel.run(np.ones((2, 3, 3), dtype=np.float32), 16)

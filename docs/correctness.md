@@ -344,9 +344,11 @@ against the unified pass, and the unified pass again with the previous-step
 logits changed by one part in a million. On the two LLaDA prompts with a random
 canvas those distances exceed the LLaDA bound (the one-in-a-million change moved
 the output by a median relative RMS of 0.18 to 0.26). No LLaDA spread was
-measured for comparison. The cause is untested: expert routing flips (8 of 128
-experts per token) carried to every row by bidirectional attention are a
-hypothesis. A failed comparison prints these distances beside the verdict. No
+measured for comparison. The reference path decision below traces the cached/
+unified differences to matrix dispatch and softmax arithmetic. The separate
+previous-logit perturbation remains untraced; changes in expert routing (8 of
+128 experts per token) propagated by bidirectional attention are a hypothesis
+for that experiment. A failed comparison prints these distances beside the verdict. No
 DiffusionGemma result is recorded yet, so the tables above hold none.
 
 The tokenizer goldens in `tests/fixtures/gemma4-tokenizer-golden.tsv` fix the
@@ -368,8 +370,8 @@ with an independent complete f32 forward on the tiny model. Real-model traces
 identify shape-dependent arithmetic in the Q/K projections and the prompt
 softmax. The projection oracle's relative RMS resolution, up to `2.8e-7`, is
 comparable to the `2.2e-7` to `3.1e-7` gap between the paths, so this evidence
-supports both as comparators at that resolution. Selecting cached leaves the
-observed numerical spread relevant to a Mojo implementation.
+supports both as comparators at that resolution. Selecting cached retains the
+full observed numerical spread for comparisons with a Mojo implementation.
 
 The measurements used recorded base `a34de8618b25dfc32ee43749db47d767a9f0a25d`
 with an overlay of the pinned CPU compilation inputs. All 403 compilation
@@ -444,9 +446,11 @@ inputs, using the metrics from `bench/check_dg_bound.py`.
 Disabling repacking removes the isolated Q projection difference and leaves
 further differences in the complete model. Additional traces at `P=9`
 with repacking disabled, and at `P=8` with repacking enabled, identify their
-first difference at the first layer's prompt `kq_soft_max` node. Q/K/V
+first prompt difference at the first layer's `kq_soft_max` node. Q/K/V
 projections, head normalization, RoPE and raw attention scores are
 bit-identical before it. The prompt softmax differs by `1.1920929e-7`.
+For canvas rows, the first differing node is `ffn_moe_gate_up-0` at `P=9`
+without repacking, and `l_out-1` at `P=8` with repacking.
 The original repacked
 `P=9` trace grows to a first-layer canvas-output error of `0.00931`.
 
@@ -501,6 +505,12 @@ comparisons retain their explicit CPU mode and measured error metrics.
 The native CPU-tool tests require `DG_REF` and `DG_MATMUL` to point at
 built executables. CI leaves those variables unset and skips those tests.
 The recorded local run enabled them explicitly.
+The Python trace and diagnostic tests run in `scripts/run_extra_group_tests.sh`
+with the fixtures group's NumPy. That step rejects any skip. The test-only
+group and native-tool skips are listed with their reasons in
+`tests/python/allowed-skips.txt`.
+The diagnostic mutation outcomes and their pytest output are recorded together
+in `bench/checks/2026-11-16-dg-diagnostic-mutations.json`.
 
 Build both reference tools against the same pinned CPU libraries, then
 run the diagnostics with new output directories.
