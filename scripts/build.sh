@@ -44,4 +44,6 @@ echo "build.sh: GPU architecture $arch ($why)" >&2
 MOJO="${MOJO:-uv run --frozen mojo}"
 mkdir -p "$(dirname "$out")"
 # shellcheck disable=SC2086  # MOJO is a command with arguments
-exec $MOJO build -Werror --target-accelerator "$arch" -D "MOJO_DLLM_GIT_SHA=$sha" -I src "$src" -o "$out"
+# The id goes in behind a `g`: the compiler reads a define of only digits as a number and drops its leading
+# zeros. build_id() in src/main.mojo strips the marker.
+exec $MOJO build -Werror --target-accelerator "$arch" -D "MOJO_DLLM_GIT_SHA=g$sha" -I src "$src" -o "$out"

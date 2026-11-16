@@ -2,6 +2,12 @@
 set -euo pipefail
 cd "$(dirname "$0")/.." || exit 1
 
+# Without git both sides of the comparison say `unknown`, and the check would pass without comparing a commit.
+if ! command -v git >/dev/null 2>&1; then
+    echo "check_build_id: git is not on PATH, so there is no commit to compare" >&2
+    exit 1
+fi
+
 binary=build/mojo-dllm
 if [ ! -x "$binary" ]; then
     echo "check_build_id: build $binary first" >&2

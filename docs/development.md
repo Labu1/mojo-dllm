@@ -13,11 +13,14 @@ fails its step; it never skips it.
 
 The hooks run `scripts/ci-local.sh --fast` before each commit (hygiene scan,
 `mojo format`, `-Werror` build) and the full set before each push.
-When a commit changes `src/`, the pre-commit build runs before that commit
-exists, so its binary records the parent `HEAD` with a `-dirty` suffix. The
-launcher decides to rebuild from file times, and that binary is newer than the
-sources, so it keeps reporting the parent commit: run `scripts/build.sh` after
-committing to stamp the new `HEAD`.
+The pre-commit build runs before its commit exists, so its binary records the
+parent `HEAD`, with a `-dirty` suffix when the commit changes `src/`. The
+launcher rebuilds when a source file is newer than the binary, or when
+`build/mojo-dllm.stamp` (written by the launcher's own build, not by
+`scripts/build.sh`) is missing or names another Mojo version or GPU
+architecture. After a hook build with a matching stamp the launcher sees a
+current binary and keeps reporting the parent commit: run `scripts/build.sh`
+after committing to stamp the new `HEAD`.
 
 ## The gates
 
