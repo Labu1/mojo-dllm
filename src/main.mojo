@@ -262,13 +262,15 @@ def _given(a: Args, flag: String) raises -> Bool:
 
 def remasking_names() -> List[String]:
     """Every `--remasking` value some architecture takes: LLaDA the first two,
-    Dream the last three (`low_confidence` means `entropy` there)."""
+    Dream `random` and the last four (`low_confidence` means `entropy` there).
+    """
     return [
         "low_confidence",
         "random",
         "entropy",
         "maskgit_plus",
         "topk_margin",
+        "origin",
     ]
 
 

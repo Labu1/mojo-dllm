@@ -27,6 +27,7 @@ from mojo_dllm.models.transformer import (
 from mojo_dllm.sys.mem import F32Ptr, Floats
 
 comptime FIX = "tests/fixtures/"
+comptime TINY_DREAM_MASK = 510
 
 
 def test_transfer_schedule_matches_generate_py() raises:
@@ -1009,9 +1010,7 @@ def test_mask_suppression_preserves_fixture_generations() raises:
     for path in ["tiny-llada.gguf", "tiny-dream.gguf"]:
         var model = DiffusionLM(FIX + path, threads=2, max_tokens=16)
         var prompt: List[Int] = [5, 17, 300]
-        var mask = 510 if path == "tiny-dream.gguf" else 511
         var on = _tiny_cfg()
-        on.mask_id = mask
         on.suppress_mask = True
         var off = on.copy()
         off.suppress_mask = False
@@ -1025,6 +1024,140 @@ def test_mask_suppression_preserves_fixture_generations() raises:
                 unchanged.tokens[i],
                 path + " position " + String(i),
             )
+
+
+struct MaskPreferringModel(DenoisingModel, Movable):
+    """A model whose logits always favour the mask token, so a loop that
+    ignores `suppress_mask` leaves masks in the canvas."""
+
+    var cfg: ModelConfig
+    var timing: Timings
+    var device_stats: Bool
+
+    def __init__(out self, path: String, device_stats: Bool = False) raises:
+        var gguf = GGUFFile(path)
+        self.cfg = ModelConfig(gguf)
+        self.timing = Timings()
+        self.device_stats = device_stats
+
+    def config(self) -> ModelConfig:
+        return self.cfg
+
+    def logit_row(self, position: Int) -> Int:
+        if self.cfg.shift_logits:
+            return max(position - 1, 0)
+        return position
+
+    def _write(self, out_rows: List[Int], logits: F32Ptr):
+        for j in range(len(out_rows)):
+            var row = logits.unsafe_offset(j * self.cfg.vocab)
+            for token in range(self.cfg.vocab):
+                row.unsafe_store(token, -5.0)
+            row.unsafe_store(self.cfg.mask_id, 10.0)
+
+    def forward(
+        mut self, tokens: List[Int], out_rows: List[Int], logits: F32Ptr
+    ) raises:
+        self._write(out_rows, logits)
+
+    def forward_window(
+        mut self,
+        tokens: List[Int],
+        lo: Int,
+        hi: Int,
+        out_rows: List[Int],
+        logits: F32Ptr,
+    ) raises:
+        self._write(out_rows, logits)
+
+    def device_row_stats(self) -> Bool:
+        return self.device_stats
+
+    def forward_stats(
+        mut self, tokens: List[Int], out_rows: List[Int], mut out: RowStats
+    ) raises:
+        raise Error("device statistics path used")
+
+    def model_name(self) raises -> String:
+        return "mask-preferring test model"
+
+    def load_time(self) -> Float64:
+        return 0.0
+
+    def stats(self) -> Timings:
+        return self.timing
+
+
+def _check_mask_suppression_wiring(path: String, temperature: Float64) raises:
+    var model = MaskPreferringModel(FIX + path)
+    var mask_id = model.config().mask_id
+    var prompt: List[Int] = [5, 17, 300]
+    var c = GenConfig()
+    c.gen_length = 8
+    c.block_length = 4
+    c.steps = 4
+    c.temperature = temperature
+    var suppressed = generate(model, prompt, c)
+    for i in range(len(prompt), len(suppressed.tokens)):
+        assert_true(
+            suppressed.tokens[i] != mask_id,
+            path + ": suppression left a mask at position " + String(i),
+        )
+    var off = c.copy()
+    off.suppress_mask = False
+    var unsuppressed = generate(model, prompt, off)
+    var masks_left = 0
+    for i in range(len(prompt), len(unsuppressed.tokens)):
+        if unsuppressed.tokens[i] == mask_id:
+            masks_left += 1
+    assert_true(masks_left > 0, path + ": the opt-out left no masks")
+
+
+def test_llada_suppression_leaves_no_mask_at_temperature_zero() raises:
+    _check_mask_suppression_wiring("tiny-llada.gguf", 0.0)
+
+
+def test_llada_suppression_leaves_no_mask_with_gumbel_noise() raises:
+    # Only temperature above 0 passes the mask id to the Gumbel argmax.
+    _check_mask_suppression_wiring("tiny-llada.gguf", 0.5)
+
+
+def test_dream_suppression_leaves_no_mask() raises:
+    _check_mask_suppression_wiring("tiny-dream.gguf", 0.0)
+
+
+def _check_device_statistics_gate(path: String) raises:
+    # Device row statistics include the mask, so suppression bypasses them;
+    # the opt-out uses them again.
+    var model = MaskPreferringModel(FIX + path, True)
+    var prompt: List[Int] = [5, 17, 300]
+    var c = GenConfig()
+    c.gen_length = 8
+    c.block_length = 4
+    c.steps = 4
+    var r = generate(model, prompt, c)
+    assert_equal(len(r.tokens), 11)
+    var off = c.copy()
+    off.suppress_mask = False
+    with assert_raises(contains="device statistics path used"):
+        _ = generate(model, prompt, off)
+
+
+def test_llada_suppression_bypasses_device_row_statistics() raises:
+    _check_device_statistics_gate("tiny-llada.gguf")
+
+
+def test_dream_suppression_bypasses_device_row_statistics() raises:
+    _check_device_statistics_gate("tiny-dream.gguf")
+
+
+def test_prob_of_the_excluded_mask_token_is_zero() raises:
+    var vocab = 8
+    var logits = Floats(vocab)
+    for v in range(vocab):
+        logits[v] = Float32(v)
+    assert_equal(_prob_of(logits.ptr(), vocab, 3, 3), 0.0)
+    assert_true(_prob_of(logits.ptr(), vocab, 3, 4) > 0.0)
 
 
 struct FirstCommit(StepObserver):
@@ -1047,7 +1180,6 @@ def _dream_cfg(gen_length: Int, steps: Int, seed: Int) -> GenConfig:
     var c = GenConfig()
     c.gen_length = gen_length
     c.steps = steps
-    c.mask_id = 510
     c.seed = seed
     c.remasking = "origin"
     return c^
@@ -1065,7 +1197,9 @@ def test_dream_origin_commits_everything_on_final_step() raises:
     assert_equal(result.forward_passes, 1)
     assert_equal(recorder.step_one_commits, 8)
     for i in range(len(prompt), len(result.tokens)):
-        assert_true(result.tokens[i] != c.mask_id, "mask left at " + String(i))
+        assert_true(
+            result.tokens[i] != TINY_DREAM_MASK, "mask left at " + String(i)
+        )
 
 
 def test_dream_origin_first_step_matches_binomial_mean() raises:
@@ -1101,7 +1235,7 @@ def test_dream_origin_and_random_are_seeded_and_resolve_masks() raises:
             )
             if i >= len(prompt):
                 assert_true(
-                    a.tokens[i] != c.mask_id, algorithm + " left a mask"
+                    a.tokens[i] != TINY_DREAM_MASK, algorithm + " left a mask"
                 )
 
     var recorder = FirstCommit()
@@ -1120,7 +1254,7 @@ def test_dream_origin_and_random_are_seeded_and_resolve_masks() raises:
             if selected == j:
                 expected = True
         var committed = (
-            recorder.step_one_tokens[len(prompt) + j] != random_cfg.mask_id
+            recorder.step_one_tokens[len(prompt) + j] != TINY_DREAM_MASK
         )
         assert_equal(
             committed,

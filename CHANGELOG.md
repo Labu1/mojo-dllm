@@ -6,6 +6,37 @@ semantic versioning (0.y: minor bumps may break things).
 
 ## [Unreleased]
 
+### Added
+
+- `mojo-dllm --version` prints a second line, `commit: <id>`, with the 12-character short id of the commit the binary was
+  built from (issue #113, pull request #167). `-dirty` follows the id when `git status` reports changes under `src/` at
+  build time, and `unknown` stands in for a build without Git metadata or one that did not go through `scripts/build.sh`.
+  `scripts/build.sh` passes the id as `-D MOJO_DLLM_GIT_SHA=g<id>` and `build_id()` removes the `g`: the compiler reads a
+  define of digits only as a number and would drop the leading zeros of an id such as `000000123456`.
+  `scripts/check_build_id.sh` builds the binary and compares the line (CI and `ci-local.sh --full` run it), and
+  `tests/python/test_build_stamp.py` pins the stamp rules against real temporary repositories. The `run --json` key set
+  is unchanged.
+- A Dream run accepts `--remasking origin` and `--remasking random` (issue #40, pull request #68). `origin` follows the
+  Python reference: each masked position commits independently with probability `1 - s/t`, forced to 1 at the final
+  step. `random` follows llama.cpp: a uniform random confidence per candidate, then the scheduled top-k. Both use
+  `--seed`; the default stays `entropy`. `--no-suppress-mask` allows the mask token as a sampled answer again.
+
+### Changed
+
+- The mask token can no longer be sampled (issue #40, pull request #68): argmax, the softmax normalizer and Gumbel
+  selection skip it, and the Gumbel draw for the skipped candidate is still consumed, so the random stream does not
+  move. `--no-suppress-mask` restores the old behavior for parity experiments. On GPU, suppression turns the device
+  row-statistics path off, so LLaDA at temperature 0 and every Dream run copy the logits back to the host (32 rows of
+  126,464 floats per LLaDA step); `--no-suppress-mask` keeps the device path. Excluding the mask inside the
+  row-statistics kernel is tracked in #284.
+- `GenConfig.mask_id` is gone again, as 0.2.0 announced: pull request #68 had added it back with -1 meaning "the model's",
+  and no code outside the tests set it. The loops read `model.config().mask_id`.
+
+### Fixed
+
+- `--remasking origin` was refused before the model loaded: the accepted names listed five values and left out `origin`.
+  `docs/cli.md` now says Dream takes all six names and LLaDA refuses `entropy`, `maskgit_plus`, `topk_margin` and `origin`.
+
 ## [0.2.0] - 2026-11-10
 
 ### Added

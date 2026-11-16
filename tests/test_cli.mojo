@@ -1404,7 +1404,7 @@ def test_run_option_values_are_checked_before_the_model_loads() raises:
     wants.append("flag --device must be cpu or gpu, got 'foo'")
     wants.append(
         "flag --remasking must be one of low_confidence, random, entropy,"
-        " maskgit_plus, topk_margin, got 'foo'"
+        " maskgit_plus, topk_margin, origin, got 'foo'"
     )
     for i in range(len(cases)):
         var rest = base.copy()
@@ -1427,6 +1427,24 @@ def _arch_run_args(extra: List[String]) raises -> Args:
     for x in extra:
         argv.append(x)
     return Args(argv, spec.values, spec.booleans)
+
+
+def test_origin_is_a_dream_remasking_name_and_llada_refuses_it() raises:
+    var flags = List[String](
+        ["--model", "m", "--prompt", "p", "--remasking", "origin"]
+    )
+    assert_equal(_check("run", flags), "")
+    var origin = _arch_run_args(["--remasking", "origin"])
+    check_arch_flags(origin, "dream")
+    with assert_raises(contains="--remasking origin does not apply to llada"):
+        check_arch_flags(origin, "llada")
+    assert_equal(gen_config(origin).remasking, "origin")
+
+
+def test_mask_suppression_is_on_unless_the_flag_turns_it_off() raises:
+    assert_true(gen_config(_arch_run_args([])).suppress_mask)
+    var off = _arch_run_args(["--no-suppress-mask"])
+    assert_true(not gen_config(off).suppress_mask)
 
 
 def test_the_block_and_step_split_is_checked_for_llada_only() raises:
