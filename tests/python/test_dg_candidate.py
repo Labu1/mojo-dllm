@@ -187,7 +187,7 @@ def test_wrong_variant_or_replaced_shared_previous_logits_is_refused(tmp_path: P
 
 
 def test_real_comparator_accepts_zero_spread_identical_executed_candidates(tmp_path: Path) -> None:
-    np = pytest.importorskip("numpy")
+    np = pytest.importorskip("numpy", reason="numpy is in the `fixtures` group, not the `test` group; CI runs this file there")
     case, model, meta = fixture(tmp_path)
     meta["ref_spread"] = {}
     (case / "case.json").write_text(json.dumps(meta))
@@ -207,6 +207,21 @@ def test_real_comparator_accepts_zero_spread_identical_executed_candidates(tmp_p
     entries, violations = parity.dg_compare(tmp_path, bound)
     assert len(entries) == 4 and violations == []
     assert all(e["candidate_receipt"]["execution"]["candidate_revision"] == "tiny-fixture" for e in entries)
+    assert all(e["mojo_dllm_commit"] == "tiny-fixture" for e in entries)
+    receipt_path = case / "cached.mojo.receipt.json"
+    receipt = json.loads(receipt_path.read_text())
+    receipt["execution"]["candidate_revision"] = "another-build"
+    receipt_path.write_text(json.dumps(receipt))
+    with pytest.raises(SystemExit, match="different builds"):
+        parity.dg_compare(tmp_path, bound)
+    receipt["execution"]["candidate_revision"] = "tiny-fixture"
+    receipt_path.write_text(json.dumps(receipt))
+    with pytest.raises(SystemExit, match="case set"):
+        parity.dg_compare(tmp_path, dict(bound, cases={**bound["cases"], "missing prompt": bound["cases"]["fixed"]}))
+    (case / "case.json").write_text(json.dumps(dict(meta, prompt="stale prompt")))
+    with pytest.raises(SystemExit, match="stale prompt"):
+        parity.dg_compare(tmp_path, bound)
+    (case / "case.json").write_text(json.dumps(meta))
     # A complete candidate still cannot be compared against an extra reference row.
     (case / "cached.ref.f32").write_bytes(struct.pack("<4f", 1.0, 2.0, 1.0, 2.0))
     with pytest.raises(SystemExit, match="shape"):
@@ -243,7 +258,7 @@ def test_protocol_refuses_copied_output_with_a_valid_receipt_and_nonzero_spread(
 
 
 def test_protocol_softcap_rejects_executed_outputs_with_all_distance_metrics_in_bound(tmp_path: Path) -> None:
-    pytest.importorskip("numpy")
+    pytest.importorskip("numpy", reason="numpy is in the `fixtures` group, not the `test` group; CI runs this file there")
     case, model, meta = fixture(tmp_path)
     meta["ref_spread"] = {}
     (case / "case.json").write_text(json.dumps(meta))

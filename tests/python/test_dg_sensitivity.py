@@ -247,7 +247,7 @@ def test_make_mutant_record_cannot_overwrite_either_model(tmp_path: Path, monkey
 
 def sensitivity_case_directories(tmp_path: Path) -> tuple[SimpleNamespace, Path, Path, dict]:
     """Write a tiny complete measurement with a changed-weight output and shared SC input."""
-    np = pytest.importorskip("numpy")
+    np = pytest.importorskip("numpy", reason="numpy is in the `fixtures` group, not the `test` group; CI runs this file there")
     original, dropped = tmp_path / "original/case0", tmp_path / "dropped/case0"
     original.mkdir(parents=True)
     dropped.mkdir(parents=True)
@@ -277,6 +277,7 @@ def test_bound_entrypoints_accept_original_previous_execution(tmp_path: Path, mo
 
     args, _, _, bound = sensitivity_case_directories(tmp_path)
     monkeypatch.setattr(check_dg_bound.parity, "dg_sensitivity_bound", lambda root: bound)
+    monkeypatch.setattr(check_dg_bound.parity, "DG_PROMPTS", ("tiny",))
     assert getattr(check_dg_bound, operation)(args) == 0
 
 
@@ -288,6 +289,7 @@ def test_bound_entrypoints_refuse_mutant_previous_or_temperature(tmp_path: Path,
 
     args, _, dropped, bound = sensitivity_case_directories(tmp_path)
     monkeypatch.setattr(check_dg_bound.parity, "dg_sensitivity_bound", lambda root: bound)
+    monkeypatch.setattr(check_dg_bound.parity, "DG_PROMPTS", ("tiny",))
     if changed == "metadata":
         path = dropped / "case.json"
         meta = json.loads(path.read_text())
@@ -311,7 +313,7 @@ def test_bound_entrypoints_refuse_mutant_previous_or_temperature(tmp_path: Path,
 def test_bound_check_refuses_a_mutant_with_extra_canvas_rows(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     import check_dg_bound
 
-    np = pytest.importorskip("numpy")
+    np = pytest.importorskip("numpy", reason="numpy is in the `fixtures` group, not the `test` group; CI runs this file there")
     args, _, dropped, bound = sensitivity_case_directories(tmp_path)
     monkeypatch.setattr(check_dg_bound.parity, "dg_sensitivity_bound", lambda root: bound)
     np.array([[2.0, 1.0], [2.0, 1.0]], dtype=np.float32).tofile(dropped / "unified.ref.f32")
@@ -324,7 +326,7 @@ def test_bound_check_reports_failures_and_cli_exits_one(tmp_path: Path, monkeypa
                                                      fault: str) -> None:
     import check_dg_bound
 
-    np = pytest.importorskip("numpy")
+    np = pytest.importorskip("numpy", reason="numpy is in the `fixtures` group, not the `test` group; CI runs this file there")
     args, original, dropped, bound = sensitivity_case_directories(tmp_path)
     if fault == "rejected-control":
         np.array([[2.0, 1.0]], dtype=np.float32).tofile(original / "cached.ref.f32")

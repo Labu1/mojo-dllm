@@ -19,7 +19,29 @@ visual-option checks, the launcher tests, lint, the benchmark-table check with
 the eval and weight-checker self-tests, the docs build and the action-pin
 check. It runs the GPU tests when `nvidia-smi` lists a GPU and skips them
 otherwise, where CI only builds them.
-[Development](docs/development.md) explains each one.
+[Development](docs/development.md) explains each one and lists the tools the
+script needs. A missing tool shows as `FAIL`.
+
+- **Paste the summary.** Copy what the script printed, from `==> summary` to
+  the last line, into the pull request description.
+- **Stage files by name.** Name each file, for example
+  `git add src/foo.mojo tests/test_foo.mojo`. `mojo format`,
+  `UPDATE_TEST_COUNT=1` and `scripts/bench_table.py --write` each rewrite
+  tracked files, and `git add -A` stages whatever they rewrote.
+- **Report only what you ran.** If you ran part of a gate (one test file,
+  `pytest -k name`), name the part. List each command you did not run.
+- **Check `main` before you call a failure pre-existing.** Run the same step
+  on a clean checkout of `main` and paste what it printed.
+- **No NVIDIA GPU?** `scripts/ci-local.sh` prints a `SKIP` line for the GPU
+  tests and goes on, and CI builds the GPU suite without running it. If you
+  changed a GPU kernel or the dispatch code, name the kernels or functions in
+  the pull request. I run the GPU suite on `main` right after I merge, and I
+  update `tests/gpu/test-count.txt` if the count moved (without a GPU,
+  `UPDATE_TEST_COUNT=1 scripts/run-gpu-tests.sh` exits 1, so you cannot).
+- **Your first pull request.** GitHub may hold CI on a first-time
+  contributor's pull request until I approve the run. The checks then show as
+  waiting, and a pull request with no check results has not passed CI. If the
+  checks have not started, say so in a comment and I will approve the run.
 
 ## How changes here are made
 
@@ -54,9 +76,10 @@ I can merge your branch once it is up to date with `main`. If it trails `main`
 and merges cleanly, I press Update branch and wait for CI to pass again. If it
 conflicts, I'll ask you to merge `main` into your branch and resolve the
 conflict yourself, since you know the change better than I do. The usual
-conflict is `tests/test-count.txt`: take either side, then run
+conflict is `tests/test-count.txt` (or `tests/test-counts.txt`, the same
+pin for each file): take either side, then run
 `UPDATE_TEST_COUNT=1 scripts/run-tests.sh` on the merged tree to pin the new
-total.
+total and the count of each file.
 
 ## Commit messages
 

@@ -153,6 +153,11 @@ activations that magnify int8 rounding. Masked positions, the ones the
 sampler reads, agree closely. Which of the two runtimes is nearer an f32
 reference at those outlier rows is not measured yet.
 
+Agreement with llama.cpp shows that two int8 implementations land near each
+other. It does not show that either is right. The only f32 forward-pass reference in this
+repository is the numpy pass on the tiny models (section 1), and the
+GPU tests compare against it too.
+
 ## 4. Generated tokens on the real model
 
 llama.cpp's own diffusion example cannot serve as a token-level reference. On
@@ -170,6 +175,17 @@ step then sees a different canvas. The table's first difference is a position
 in the final output; it does not identify the denoising step or the cause of
 the mismatch. Exact token agreement is specific to the measured prompt and
 configuration.
+
+What this section covers: two prompts, 32 and 64 generated tokens (the
+benchmarks use 128), temperature 0, 32 steps, with low-confidence remasking for
+LLaDA and entropy ranking for Dream. The tables below give the count of equal
+tokens and the first difference for each model; on the speculative-decoding
+prompt several are well short of a full match, and Dream-v0's code prompt
+diverges within its first few tokens. Not covered: Gumbel noise (temperature
+above 0), random remasking, Dream's other remasking algorithms, classifier-free
+guidance (`cfg_scale`), `alg_temp`, and generation at 128 tokens. `--threshold`
+and `--dual-cache` have a paired GSM8K comparison instead
+([Benchmarks](benchmarks.md#accuracy-of---threshold-and---dual-cache)).
 
 <!-- genparity:start -->
 **LLaDA-1.5.Q4_K_M.gguf**
@@ -267,6 +283,15 @@ uv run --only-group fixtures python bench/parity.py --arch dream --threads 4 --m
 uv run --no-project python scripts/bench_table.py --write
 ```
 
+`llada_ref` refuses a token, a row or a count that is not an integer, a row
+outside the tokens, a token outside the vocabulary, an output it cannot write
+and any non-finite logit in a row it reads. Each refusal prints a line that
+begins `llada_ref:` and exits non-zero (1 for the arguments, 2 for the model
+or a file, 3 for llama.cpp or a NaN). It writes `OUT.part` and moves it to
+`OUT` only after every row passed, so a failed run leaves no file under the
+name `bench/parity.py` reads. `tests/python/test_llada_ref.py` builds it with
+the host compiler against a stand-in for llama.cpp and runs each refusal.
+
 The GPU tables need `--device gpu` and a second reference. Compile
 `llada_ref` once more against the CUDA build of llama.cpp (`build-cuda/`, see
 [Development](development.md#benchmarks)), name the result
@@ -315,7 +340,7 @@ from those controls each time.
 
 The four prompts are speculative decoding, diffusion versus autoregressive
 models, a prime-checking Python function, and a Chinese-to-English translation.
-The record includes every prompt/canvas token ID, seeds 66–69, the 256-token
+The record includes every prompt/canvas token ID, seeds 66-69, the 256-token
 canvas, vocabulary size, and `prev_temp_inv=1.25`. The GGUF provenance names the
 Hugging Face repository, pinned revision and declared LFS object ID, with the
 download's verified byte count. A different input/model requires its own
@@ -335,6 +360,13 @@ case/state has nonzero reference spread, so the protocol also refuses a candidat
 output that is byte-identical to its reference. This safeguard catches a command
 that simply copies the reference despite producing an otherwise valid receipt.
 The parity record uses the candidate revision recorded at export.
+The comparison requires `case0` through `case3`, in the measured prompt order,
+and one candidate build across all cases and variants. The historical
+LLaDA-bound checker uses `<variant>.mojo.f32.json` sidecars with a
+`case_sha256` and `mojo_dllm_commit`; the fixed-input protocol uses the fuller
+execution receipts described above. Starting a new reference run clears old
+candidate outputs, sidecars and receipts. A result is written atomically, and
+replacing an existing result requires `--force`.
 
 A pass establishes agreement with the measured envelope on these fixed inputs,
 including the model's soft-cap and execution-receipt checks. Correctness
@@ -393,7 +425,7 @@ object ID. Its SC passes consume the original model's previous logits,
 which isolates the current forward pass. The soft-cap inverse promotes to f64
 before clipping to a representable value below one, including logits rounded
 exactly to either cap. The report also retains total-variation and
-Jensen–Shannon distances at temperature 0.8 as diagnostics. The acceptance rule
+Jensen-Shannon distances at temperature 0.8 as diagnostics. The acceptance rule
 uses the five calibrated metrics and the explicit cap invariant. For soft-cap
 removal, the cap invariant and largest-logit error detect the fault. The other
 four calibrated metrics stay within their bounds in all 16 comparisons.

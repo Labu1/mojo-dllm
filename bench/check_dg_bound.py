@@ -177,9 +177,9 @@ def sensitivity_report(args: argparse.Namespace) -> int:
     return 0
 
 
-def load_cases(folder: pathlib.Path) -> dict[str, tuple[dict, pathlib.Path]]:
+def load_cases(folder: pathlib.Path, prompts: tuple[str, ...] | None = None) -> dict[str, tuple[dict, pathlib.Path]]:
     cases = {}
-    for case_json in sorted(folder.glob("case*/case.json")):
+    for case_json in parity.dg_case_files(folder, parity.DG_PROMPTS if prompts is None else prompts):
         ref = case_json.parent / "unified.ref.f32"
         if not ref.is_file():
             raise SystemExit(f"refusing: {ref} is missing; run bench/parity.py --phase ref first")
@@ -195,8 +195,9 @@ def check(args: argparse.Namespace) -> int:
     import dg_sensitivity as sensitivity
 
     bound = parity.dg_sensitivity_bound(ROOT)
-    cases = load_cases(pathlib.Path(args.cases))
-    dropped = load_cases(pathlib.Path(args.dropped)) if args.dropped else {}
+    prompts = tuple(bound["cases"])
+    cases = load_cases(pathlib.Path(args.cases), prompts)
+    dropped = load_cases(pathlib.Path(args.dropped), prompts) if args.dropped else {}
     if args.dropped and set(dropped) != set(cases):
         raise SystemExit("refusing: --dropped holds different cases from CASES_DIR")
     if {meta["prompt"] for meta, _ in cases.values()} != set(bound["cases"]):

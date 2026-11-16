@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-np = pytest.importorskip("numpy")
+np = pytest.importorskip("numpy", reason="numpy is in the `fixtures` group, not the `test` group; CI runs this file there")
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "bench"))
 check = importlib.import_module("check_dg_bound")
 sensitivity = importlib.import_module("dg_sensitivity")
