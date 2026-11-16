@@ -1033,12 +1033,18 @@ struct MaskPreferringModel(DenoisingModel, Movable):
     var cfg: ModelConfig
     var timing: Timings
     var device_stats: Bool
+    var top_token: Int
+    var top_logit: Float32
+    var mask_by_row: List[Float32]
 
     def __init__(out self, path: String, device_stats: Bool = False) raises:
         var gguf = GGUFFile(path)
         self.cfg = ModelConfig(gguf)
         self.timing = Timings()
         self.device_stats = device_stats
+        self.top_token = -1
+        self.top_logit = 0.0
+        self.mask_by_row = List[Float32]()
 
     def config(self) -> ModelConfig:
         return self.cfg
@@ -1053,7 +1059,12 @@ struct MaskPreferringModel(DenoisingModel, Movable):
             var row = logits.unsafe_offset(j * self.cfg.vocab)
             for token in range(self.cfg.vocab):
                 row.unsafe_store(token, -5.0)
-            row.unsafe_store(self.cfg.mask_id, 10.0)
+            if self.top_token >= 0:
+                row.unsafe_store(self.top_token, self.top_logit)
+            var mask_logit = Float32(10.0)
+            if j < len(self.mask_by_row):
+                mask_logit = self.mask_by_row[j]
+            row.unsafe_store(self.cfg.mask_id, mask_logit)
 
     def forward(
         mut self, tokens: List[Int], out_rows: List[Int], logits: F32Ptr
@@ -1124,6 +1135,32 @@ def test_llada_suppression_leaves_no_mask_with_gumbel_noise() raises:
 
 def test_dream_suppression_leaves_no_mask() raises:
     _check_mask_suppression_wiring("tiny-dream.gguf", 0.0)
+
+
+def test_llada_confidence_leaves_the_mask_out_of_the_normalizer() raises:
+    # The two canvas rows differ only in the mask logit: 60 on the first and
+    # -50 on the second. With the mask excluded both confidences are 1.0 and
+    # the lower position commits first. A mask counted in the normalizer would
+    # give the first row a confidence near 0 and commit the second position.
+    var model = MaskPreferringModel(FIX + "tiny-llada.gguf")
+    model.top_token = 7
+    model.top_logit = 40.0
+    model.mask_by_row = [60.0, -50.0]
+    var prompt: List[Int] = [5, 17, 300]
+    var c = GenConfig()
+    c.gen_length = 2
+    c.block_length = 2
+    c.steps = 2
+    c.temperature = 0.5
+    var recorder = FirstCommit()
+    _ = generate_observed(model, prompt, c, recorder)
+    var mask_id = model.config().mask_id
+    assert_equal(recorder.step_one_commits, 1)
+    assert_true(
+        recorder.step_one_tokens[len(prompt)] != mask_id,
+        "the first canvas position commits first",
+    )
+    assert_equal(recorder.step_one_tokens[len(prompt) + 1], mask_id)
 
 
 def _check_device_statistics_gate(path: String) raises:
