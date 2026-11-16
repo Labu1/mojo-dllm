@@ -117,14 +117,14 @@ the command stops with the usage error `--json cannot be combined with --visual`
 `--json`, stdout holds the one JSON object and nothing else.
 
 The checks that need only the flags run before the model file is opened, and each exits with status 2 and names the flag:
-`--threshold` outside 0 to 1 or not finite, `--device` other than `cpu` or `gpu`, `--remasking` outside the five names
+`--threshold` outside 0 to 1 or not finite, `--device` other than `cpu` or `gpu`, `--remasking` outside the six names
 above, and `--threshold` above 0 with `--remasking random`. LLaDA also needs a `--block-length` that divides
 `--max-tokens` and a `--steps` that is a multiple of the number of blocks (Dream reads neither flag and accepts any
 value); that check depends on the architecture, which only the file's header says, so it runs once the header is read,
 still before any weight is mapped, and exits with status 1, as does the check of the default block length (32, or
 `--max-tokens` when smaller): `flag --max-tokens 100 is not a multiple of the default block
-length 32`. The same header check refuses a `--remasking` value that the file's architecture does not take (`entropy`,
-`maskgit_plus` and `topk_margin` for LLaDA, `random` for Dream).
+length 32`. The same header check refuses a `--remasking` value that LLaDA does not take (`entropy`, `maskgit_plus`,
+`topk_margin` and `origin`); Dream takes all six.
 
 Invalid `--visual-interval` values and use without `--visual` exit with status
 1 before model loading. The messages name `--visual-interval`: `must be at

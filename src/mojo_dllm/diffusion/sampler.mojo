@@ -50,7 +50,6 @@ struct GenConfig(Copyable, Movable):
     var temperature: Float64
     var remasking: String
     var seed: Int
-    var mask_id: Int
     var suppress_mask: Bool
     """Exclude mask_id from token selection and softmax; disable for parity."""
     var full_logits: Bool
@@ -93,7 +92,6 @@ struct GenConfig(Copyable, Movable):
         self.temperature = 0.0
         self.remasking = "low_confidence"
         self.seed = 42
-        self.mask_id = -1
         self.suppress_mask = True
         self.full_logits = False
         self.eps = 1e-3
@@ -466,9 +464,7 @@ def _generate_llada[
     var P = len(prompt)
     var L = P + cfg.gen_length
     var vocab = model.config().vocab
-    var mask_id = cfg.mask_id
-    if mask_id < 0:
-        mask_id = model.config().mask_id
+    var mask_id = model.config().mask_id
     var excluded_mask_id = mask_id if cfg.suppress_mask else -1
     var res = GenResult()
     for t in prompt:
@@ -734,9 +730,7 @@ def _generate_dream[
             "Dream needs at least one prompt token (logits are shifted)"
         )
     var vocab = model.config().vocab
-    var mask_id = cfg.mask_id
-    if mask_id < 0:
-        mask_id = model.config().mask_id
+    var mask_id = model.config().mask_id
     var excluded_mask_id = mask_id if cfg.suppress_mask else -1
     var res = GenResult()
     for t in prompt:

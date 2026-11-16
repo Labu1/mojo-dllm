@@ -181,6 +181,14 @@ def _run(path: Int, bad: Int, kind: Int) raises -> GenResult:
         or path == DREAM_MASKGIT_STATS,
     )
     var cfg = _config(arch)
+    if (
+        path == LLADA_STATS
+        or path == DREAM_STATS
+        or path == DREAM_MASKGIT_STATS
+    ):
+        # Mask suppression bypasses the device statistics; without this the
+        # three statistics paths would run on the host and prove nothing.
+        cfg.suppress_mask = False
     if path == DREAM_MASKGIT or path == DREAM_MASKGIT_STATS:
         cfg.remasking = "maskgit_plus"
     if path == DREAM_MARGIN:

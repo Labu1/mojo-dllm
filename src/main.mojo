@@ -172,9 +172,22 @@ def version_line() -> String:
     return "mojo-dllm " + VERSION
 
 
+def stamped_id(raw: String) -> String:
+    """The commit id inside the build define, without the `g` marker.
+
+    scripts/build.sh writes `g<id>`. The compiler reads a define made only of
+    digits as a number, so `000000123456` would print as `123456`. No hex id
+    starts with `g`, which tells the marker from an id. A define without the
+    marker (a plain `mojo build`, the default `unknown`) comes back unchanged.
+    """
+    if raw.startswith("g"):
+        return String(raw[byte=1:])
+    return raw
+
+
 def build_id() -> String:
     """The commit scripts/build.sh stamped in, or `unknown`."""
-    return String(GIT_SHA)
+    return stamped_id(String(GIT_SHA))
 
 
 def version_text() -> String:
@@ -249,13 +262,15 @@ def _given(a: Args, flag: String) raises -> Bool:
 
 def remasking_names() -> List[String]:
     """Every `--remasking` value some architecture takes: LLaDA the first two,
-    Dream the last three (`low_confidence` means `entropy` there)."""
+    Dream `random` and the last four (`low_confidence` means `entropy` there).
+    """
     return [
         "low_confidence",
         "random",
         "entropy",
         "maskgit_plus",
         "topk_margin",
+        "origin",
     ]
 
 
