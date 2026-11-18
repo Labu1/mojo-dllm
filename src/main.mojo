@@ -2,8 +2,9 @@
 
     mojo-dllm run      --model M --prompt TEXT [--max-tokens N] [--steps N] [--block-length N]
                        [--seed N] [--temperature T] [--threads N] [--device cpu|gpu]
-                       [--remasking low_confidence|random] [--threshold P] [--dual-cache]
-                       [--no-chat] [--full-logits] [--no-early-stop] [--visual] [--visual-interval N] [--verbose]
+                       [--remasking S] [--threshold P] [--dual-cache]
+                       [--no-chat] [--full-logits] [--no-early-stop] [--no-suppress-mask]
+                       [--visual] [--visual-interval N] [--verbose]
                        [--dump-step-stats] [--json]
                        [--eb-steps N] [--eb-t-min T] [--eb-t-max T] [--eb-bound B]
                        [--eb-stability N] [--eb-confidence C]
@@ -18,7 +19,7 @@ from std.collections import Dict
 from std.math import isfinite
 from std.os import getenv, remove
 from std.os.path import exists, getsize, isdir, isfile
-from std.sys import argv, exit, num_logical_cores, stderr
+from std.sys import argv, exit, get_defined_string, num_logical_cores, stderr
 from std.time import perf_counter_ns
 
 from cli.args import (
@@ -48,13 +49,15 @@ from mojo_dllm.models.transformer import (
     ModelConfig,
     Timings,
     GEMMA_ARCH,
+    gemma_run_refusal,
 )
 from mojo_dllm.sys.mem import Bytes, F32Ptr, Floats, U8Ptr
 from mojo_dllm.sys.mmap import Mapping
 from mojo_dllm.tokenizer.bpe import Tokenizer
 from mojo_dllm.tokenizer.gemma4 import gemma4_chat_prompt
 
-comptime VERSION = "0.1.0"
+comptime VERSION = "0.2.0"
+comptime GIT_SHA = get_defined_string["MOJO_DLLM_GIT_SHA", "unknown"]()
 
 
 struct CommandSpec(Movable):
@@ -145,16 +148,15 @@ def command_usage(command: String) raises -> String:
             " [--steps 128] [--block-length 32]\n"
             + "                [--seed 42] [--temperature 0] [--threads N]"
             " [--device cpu|gpu]\n"
-            + "                [--remasking low_confidence|random] [--threshold"
-            " P] [--dual-cache]\n"
+            + "                [--remasking S] [--threshold P] [--dual-cache]\n"
             + "                [--no-chat] [--full-logits] [--no-early-stop]"
-            " [--visual] [--visual-interval N] [--verbose]"
+            " [--no-suppress-mask] [--visual] [--visual-interval N] [--verbose]"
             " [--dump-step-stats] [--json]\n"
             + "                [--eb-steps 48] [--eb-t-min 0.4] [--eb-t-max"
             " 0.8] [--eb-bound 0.1]\n"
             + "                [--eb-stability 1] [--eb-confidence 0.005]\n"
             + "                (the eb-* flags have no effect until run accepts"
-            " diffusion-gemma (#64))"
+            " diffusion-gemma (#277))"
         )
     if command == "tokenize":
         return "  mojo-dllm tokenize --model M --prompt TEXT [--no-chat]"
@@ -175,8 +177,31 @@ def usage_for(command: String) raises -> String:
 
 
 def version_line() -> String:
-    """The one line `mojo-dllm --version` prints."""
+    """The package-version line used by the CLI and `--version` output."""
     return "mojo-dllm " + VERSION
+
+
+def stamped_id(raw: String) -> String:
+    """The commit id inside the build define, without the `g` marker.
+
+    scripts/build.sh writes `g<id>`. The compiler reads a define made only of
+    digits as a number, so `000000123456` would print as `123456`. No hex id
+    starts with `g`, which tells the marker from an id. A define without the
+    marker (a plain `mojo build`, the default `unknown`) comes back unchanged.
+    """
+    if raw.startswith("g"):
+        return String(raw[byte=1:])
+    return raw
+
+
+def build_id() -> String:
+    """The commit scripts/build.sh stamped in, or `unknown`."""
+    return stamped_id(String(GIT_SHA))
+
+
+def version_text() -> String:
+    """The two lines `mojo-dllm --version` prints."""
+    return version_line() + "\ncommit: " + build_id()
 
 
 def usage() raises -> String:
@@ -246,13 +271,15 @@ def _given(a: Args, flag: String) raises -> Bool:
 
 def remasking_names() -> List[String]:
     """Every `--remasking` value some architecture takes: LLaDA the first two,
-    Dream the last three (`low_confidence` means `entropy` there)."""
+    Dream `random` and the last four (`low_confidence` means `entropy` there).
+    """
     return [
         "low_confidence",
         "random",
         "entropy",
         "maskgit_plus",
         "topk_margin",
+        "origin",
     ]
 
 
@@ -612,7 +639,7 @@ def eb_flags() -> List[String]:
 
 def llada_only_flags() -> List[String]:
     """The flags Dream accepts on the command line and never reads."""
-    return ["full-logits", "threshold", "dual-cache"]
+    return ["full-logits", "threshold", "dual-cache", "block-length"]
 
 
 def sampler_json(arch: String, cfg: GenConfig) -> String:
@@ -664,13 +691,19 @@ def check_arch_flags(a: Args, arch: String) raises:
         if schedule.byte_length() > 0:
             raise Error(schedule)
     elif arch == "dream":
-        if remasking == "random":
+        if (
+            remasking != "low_confidence"
+            and remasking != "entropy"
+            and remasking != "maskgit_plus"
+            and remasking != "topk_margin"
+            and remasking != "origin"
+            and remasking != "random"
+        ):
             raise Error(
-                "--remasking random does not apply to dream (entropy,"
-                " maskgit_plus or topk_margin; low_confidence means entropy)"
+                "unknown Dream algorithm: "
+                + remasking
+                + " (entropy, maskgit_plus, topk_margin, origin, random)"
             )
-        # `--block-length` is read by LLaDA only too, but the benchmark and
-        # parity scripts pass it for every architecture, so it is not refused.
         for flag in llada_only_flags():
             if a.has(flag):
                 raise Error("--" + flag + " applies to llada only, not " + arch)
@@ -746,6 +779,7 @@ def gen_config(a: Args) raises -> GenConfig:
     cfg.threshold = a.float_or("threshold", 0.0)
     cfg.full_logits = a.has("full-logits")
     cfg.dual_cache = a.has("dual-cache")
+    cfg.suppress_mask = not a.has("no-suppress-mask")
     cfg.threads = a.int_or("threads", num_logical_cores())
     cfg.eb_steps = a.int_or("eb-steps", cfg.eb_steps)
     cfg.eb_t_min = a.float_or("eb-t-min", cfg.eb_t_min)
@@ -782,11 +816,7 @@ def cmd_run(a: Args) raises:
     if g.architecture() == GEMMA_ARCH:
         # Before the tokenizer, the prompt and the model: DiffusionGemma has no
         # DenoisingModel yet, so no work done here could end in a run.
-        raise Error(
-            GEMMA_ARCH
-            + " does not run on this model: `run` waits for the generation"
-            " loop (#64), so use `logits` (CPU) until then"
-        )
+        raise Error(gemma_run_refusal())
     var tok = Tokenizer(g)
     check_tokenizer_matches_model(g, tok)
     var prompt = encode_prompt(tok, g.architecture(), a)
@@ -1418,6 +1448,7 @@ def boolean_flags() -> List[String]:
         "json",
         "visual",
         "no-early-stop",
+        "no-suppress-mask",
         "dual-cache",
     ]
 
@@ -1469,10 +1500,10 @@ struct Decision(Movable):
 def decide(raw: List[String]) raises -> Decision:
     """Help, usage errors and valid arguments, in that order of precedence."""
     var command = raw[1] if len(raw) > 1 else String("")
+    if command == "--version":
+        return Decision.help(version_text())
     if is_top_level_help(command):
         return Decision.help(usage())
-    if command == "--version":
-        return Decision.help(version_line())
     if not command_known(command):
         return Decision.error(
             "unknown command: " + command + "\nsee: mojo-dllm --help"

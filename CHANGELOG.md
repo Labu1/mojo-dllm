@@ -8,6 +8,39 @@ semantic versioning (0.y: minor bumps may break things).
 
 ### Added
 
+- `mojo-dllm --version` prints a second line, `commit: <id>`, with the 12-character short id of the commit the binary was
+  built from (issue #113, pull request #167). `-dirty` follows the id when `git status` reports changes under `src/` at
+  build time, and `unknown` stands in for a build without Git metadata or one that did not go through `scripts/build.sh`.
+  `scripts/build.sh` passes the id as `-D MOJO_DLLM_GIT_SHA=g<id>` and `build_id()` removes the `g`: the compiler reads a
+  define of digits only as a number and would drop the leading zeros of an id such as `000000123456`.
+  `scripts/check_build_id.sh` builds the binary and compares the line (CI and `ci-local.sh --full` run it), and
+  `tests/python/test_build_stamp.py` pins the stamp rules against real temporary repositories. The `run --json` key set
+  is unchanged.
+- A Dream run accepts `--remasking origin` and `--remasking random` (issue #40, pull request #68). `origin` follows the
+  Python reference: each masked position commits independently with probability `1 - s/t`, forced to 1 at the final
+  step. `random` follows llama.cpp: a uniform random confidence per candidate, then the scheduled top-k. Both use
+  `--seed`; the default stays `entropy`. `--no-suppress-mask` allows the mask token as a sampled answer again.
+
+### Changed
+
+- The mask token can no longer be sampled (issue #40, pull request #68): argmax, the softmax normalizer and Gumbel
+  selection skip it, and the Gumbel draw for the skipped candidate is still consumed, so the random stream does not
+  move. `--no-suppress-mask` restores the old behavior for parity experiments. On GPU, suppression turns the device
+  row-statistics path off, so LLaDA at temperature 0 and every Dream run copy the logits back to the host (32 rows of
+  126,464 floats per LLaDA step); `--no-suppress-mask` keeps the device path. Excluding the mask inside the
+  row-statistics kernel is tracked in #284.
+- `GenConfig.mask_id` is gone again, as 0.2.0 announced: pull request #68 had added it back with -1 meaning "the model's",
+  and no code outside the tests set it. The loops read `model.config().mask_id`.
+
+### Fixed
+
+- `--remasking origin` was refused before the model loaded: the accepted names listed five values and left out `origin`.
+  `docs/cli.md` now says Dream takes all six names and LLaDA refuses `entropy`, `maskgit_plus`, `topk_margin` and `origin`.
+
+## [0.2.0] - 2026-11-10
+
+### Added
+
 - `bench/engines/sglang.py`, an engine for `bench/eval_engine.py` that answers GSM8K through the OpenAI-compatible
   endpoint of a running SGLang server (issue #180): `--engine sglang --base-url URL`, with the declared `--dtype`,
   `--algorithm`, `--checkpoint`, `--max-running-requests` and `--chat-template`. The request has four fields (`model`,
@@ -87,7 +120,7 @@ semantic versioning (0.y: minor bumps may break things).
   small. Six flags (`--eb-steps`, `--eb-t-min`, `--eb-t-max`, `--eb-bound`,
   `--eb-stability`, `--eb-confidence`) default to the llama.cpp branch's
   values. `--json` gains `steps_taken` and `stop_reason` for every model. The
-  forward pass is #64; tests use a scripted model.
+  forward pass is #64, and #277 tracks wiring it to this loop; tests use a scripted model.
 - `scripts/check_weights.py` compares GGUF tensor shapes with safetensors
   headers, with LLaDA/Dream name mapping and a standalone self-test.
 - Q8_0 and Q5_K reference decoders, with GGUF type sizing and reference tests
@@ -174,6 +207,111 @@ semantic versioning (0.y: minor bumps may break things).
 
 ### Changed
 
+- A Dream run refuses `--block-length` by name (`--block-length applies to llada only, not dream`) before the model loads (#206).
+  Dream has no blocks and never read it; the benchmark, parity, dispatch and profile scripts stopped passing it for Dream in the part 2
+  fixes, so the refusal no longer breaks them.
+- `bench/parity.py --phase compare` for DiffusionGemma refuses a partial or stale case set (issue #231). It requires
+  `case0` to `case{N-1}` for the N entries of `LOGIT_CASES` with each prompt equal to the file's, and
+  `bench/check_dg_bound.py` uses the same check. Each `<variant>.mojo.f32` needs a `.mojo.f32.json` sidecar with the
+  case hash and the commit of the build that wrote it; a missing sidecar, another case's hash, an empty commit or two
+  commits across the dumps is refused by name, and the evidence records that commit as `versions["mojo-dllm"]`
+  instead of `git HEAD` at compare time. `--phase ref` deletes the old dumps.
+- `scripts/bench_table.py` derives the sentence about the machine from the compare documents (issue #232). A GSM8K
+  timing round that has no `noisy_rows` and `unchecked_rows` is described as carrying no isolation record, which
+  changes one sentence in `docs/benchmarks.md` (the four committed compare files are unchanged). A null
+  `forward_passes_mean` prints `n/a`, a `weights_differ` document is marked and names both models, and a null interval
+  prints `not estimable`.
+- `run_bench` records `clean_runs`, `noisy_runs` and `unchecked_runs` per runtime, and `bench_table.py` names noisy runs
+  next to the busy ones, gives the median of the runs that were neither, counts runs without a window when the same file
+  has runs with one, and refuses a run with no `cpu_busy_before` (issue #233). A timed GSM8K round with fewer clean
+  rows than problems is refused unless `bench_table.py --allow-noisy` is given.
+- `run_bench` refuses `--reps` below 1, a runtime name the config does not list and an empty selection, marks a
+  diffuse-cpp run that printed no `step i/N` line as failed, checks that mojo-dllm did the configured number of forward
+  passes over the prompt `tokenize` counted, and requires `tokenize` to print token ids (issue #234).
+- `run_bench` and the isolation arm restore the machine on every way out (issue #235). The power profile goes through
+  `isolation.tuned` with a read-back, an unreadable profile stops the run before it measures, the battery pause and
+  resume hooks are read back, the closing snapshot of `ARM.env.json` is logged and skipped when the file is missing or
+  corrupt, and none of the cleanup steps replaces the error being raised. The watchdog kills only this user's `pytest`
+  and reports a kill the kernel refuses.
+- `eval_gsm8k` reads an answer wrapped in `\( \)`, `\[ \]`, `\boxed{}`, `**` or `$`, and `canon` is exact for numbers
+  of any length and returns `None` for anything that is not a number, where a 400-digit answer used to abort the arm
+  (issue #236). All 602 committed rows score as before.
+- `eval_gsm8k compare` reports Newcombe's hybrid score interval, with `ci95_method`, and a null `ci95` when the arms
+  never disagree (issue #237). It refuses arms that answered different problems and an existing output file.
+  For the committed threshold09 comparison the interval goes from -2.2 to +1.2 points to -2.8 to +1.7; the committed
+  compare files keep their Wald intervals and the table labels them as such.
+- `eval_gsm8k run` takes `--timeout-s` (default 1800 s, the engine runner's value) and `answered()` exits with the arm
+  and line number for a truncated line, a row without `flags` and a duplicate index (issue #238).
+- Result files from `run_bench`, `quality`, `parity` and `eval_gsm8k compare` are written through
+  `bench/atomic_write.py`: a temporary file renamed over the target, and an existing dated file is refused before the
+  long work starts unless `--force` is given (issue #239).
+- The preflight and the quiet gate of `bench/isolation.py` leave out the GPU processes of this process tree and the
+  memory they hold, so `eval_engine.py --engine hf --device gpu` no longer fails its own preflight (issue #240).
+- Engines return a frozen `GenResult` that refuses blank text, a `generate_s` that is not finite and above 0 and bad
+  counts (issue #241). `forward_passes` is the engine's own count or null; llama.cpp and the Transformers arm put the
+  configured count in `steps`. `compare` gives no mean for an arm whose flags say `forward_passes_measured: false`.
+  Engine rows carry `schema`, `steps`, `completion_tokens` and `finish_reason`, mojo rows carry `schema`, and
+  `docs/benchmarks.md` says what `stopped_early` means.
+- `bench/parity_schema.py` validates every `bench/parity/*.json` (issue #242): required and unknown keys, the metric
+  ranges, `matching_tokens <= gen_length`, `first_divergence` being null only when every token matches, and agreement
+  with the token lists when they are present. `parity.py` validates before it writes and records `threads`, the machine
+  and both generated token lists; `bench_table.py` refuses an invalid file.
+- `isolation.Check` refuses a status outside PASS, WARN and FAIL, `Thresholds` refuses a negative, NaN or out-of-unit
+  limit, the window record has a `TypedDict`, and `power._info` derives `on_battery` from the one `power_source` it
+  computes (issue #243).
+- `run_bench`, `eval_gsm8k run` and `parity` do not pass `--block-length` for Dream (config key `arch: dream`,
+  `--arch dream`), ahead of the refusal planned in #206.
+- `bench/spec.py` holds the mask and vocabulary ids, the three benchmark prompts, the llama.cpp settings, the DiffusionGemma
+  seeds and the generation timeout that the benchmark tools used to repeat (issue #244). `run_bench` builds the
+  llama.cpp command with the function the GSM8K engine uses, `GenConfig` refuses a device or a schedule it does not know,
+  and `run_bench` refuses an unknown runtime name before the preflight. `spec.result_meta` gives `compare_gpu.py` and
+  `quality.py` one convention for `threads` (an integer) and `versions`; a new `quality` file records `threads` as a
+  number. No committed file changes.
+- `scripts/compare_logits.py` refuses a NaN or infinity in any logit row and a row of zeros, and its median is the mean of
+  the middle pair for an even number of rows (issue #245).
+- `compare_gpu.py`, `check_gpu_dispatch.py` and `compare_logits.py` refuse a base and a new that are the same checkout, the
+  same clean commit or byte-identical binaries, refuse an empty prompt list, and record the SHA-256 of each
+  `build/mojo-dllm` (issue #246). `compare_gpu.py` sets `CUDA_DEVICE_ORDER=PCI_BUS_ID`, accepts a GPU index or a `GPU-`
+  uuid, records `gpu_index` and the uuid and bus id read back from `nvidia-smi`, and runs the isolation preflight and a
+  window around each run. `run_bench` and `eval_gsm8k` record the binary hash. `check_gpu_dispatch.py` and
+  `scripts/gpu_profile.py` stop passing `--block-length` for Dream (issue #206, the last two tools).
+- `scripts/bench-quiet.sh` exports `timers:N,pm:N,clocks:N,refused:N` in `BENCH_QUIET_ACTIVE` and `bench/isolation.py`
+  records it as `bench_quiet_changes` (issue #247). The script writes each change to its state file before making it and
+  handles every GPU with `nvidia-smi -i N`, so the restore touches only what the run changed on each card.
+- `scripts/build.sh` prints the GPU architecture it chose and why, with a warning when `nvidia-smi` is installed but
+  fails. `scripts/check_format.sh` (used by `ci-local.sh` and CI) compares file contents before and after `mojo format`,
+  so an untracked file counts. `scripts/run-tests.sh` also checks the count of each file against
+  `tests/test-counts.txt` (`tests/gpu/test-counts.txt` for the GPU suite), written with the total by
+  `UPDATE_TEST_COUNT=1` (issue #248).
+- `tools/ref/llada_ref.cpp` parses every integer strictly, bounds-checks the row indices, token ids and mask id, checks every
+  write and every logit for finiteness, writes the logits through a `.part` file and exits non-zero with a message
+  (issue #249); `tests/python/test_llada_ref.py` builds it with the host compiler against a stand-in for llama.cpp.
+- `parity.compare` refuses non-finite logits, a row of zeros, matrices of different shape and a `first_mask` that leaves no
+  masked row, and `dg_top1_error` refuses a zero reference maximum (issue #250). New tests run the real `compare`, the
+  `run_bench` parsers and every isolation limit at the limit and one unit past it.
+- The gate scripts `verify-action-pins.sh`, `action-pin-comments.py`, `check_hygiene.sh`, `check_links.py`, `run-tests.sh`
+  and `bench/check_dg_bound.py` have tests that prove each can fail (issue #251). `check_links.py` now reads titled links
+  and reference definitions and skips fenced code blocks. Tests that need numpy, gguf or PyYAML skip with a visible
+  reason, and one CI step and one `ci-local.sh` step run them with those groups and fail on any skip.
+- `scripts/bench_table.py` exits 2 on an unknown or missing mode (issue #142) and treats a missing marker, a missing
+  document and an empty evidence directory as errors that name the file (issue #141).
+  `scripts/check_hygiene.sh` reads file names NUL separated, so a name git quotes is scanned (issue #140).
+  `scripts/build_dg_ref.sh` fetches the pinned commit by URL and leaves the remotes of an existing tree alone
+  (issue #165).
+- `scripts/bench_table.py` re-derives `tokens_per_s_median`, `startup_s_median` and `peak_rss_gb_max` from the runs
+  (issue #253). `bench/report_gpu_dispatch.py` computes its prose from the timing files and reads the SM count, the Mojo
+  and max-core versions and the host notes from `environment.json` beside them, and refuses an empty list or a
+  difference in the exactness files with an explicit error. Each fixture of `scripts/gen_fixtures.py` that drew from the
+  shared stream now starts its own generator at the position it had, so the committed bytes do not change and the order
+  of the functions does not matter, and a regeneration removes a file that an earlier run made and this one does not,
+  listed in `tests/fixtures/gen_fixtures.manifest`.
+- Comments, usage lines and one generated report in `bench/`, `scripts/` and `tools/` match the code and the data
+  (issue #252); the en dashes of `bench/results/6000d-dispatch/README.md` and `6000d-q6-standalone/README.md` are gone.
+- `scripts/check_links.py` closes a code fence only on a line of the same character and at least the same length, so a
+  longer fence that holds a shorter one no longer lets a real link go unchecked. `scripts/check_gpu_test_count.sh` also
+  compares each GPU test file's count with `tests/gpu/test-counts.txt`, without a GPU, and
+  `scripts/run_extra_group_tests.sh` (one step in CI and `ci-local.sh`) runs the `llada_ref` tests too and fails on a skip.
+
 - The transposed embedding table of DiffusionGemma's self-conditioning is no longer zeroed before it is written, and the
   `soft_embed` partial sums and the CPU attention scores are not zeroed where every element is written first
   (issue #226). `Floats` takes `zero=False` for that. At the real size (vocabulary 262144, hidden 2816, 256 canvas
@@ -233,7 +371,7 @@ semantic versioning (0.y: minor bumps may break things).
   in `bench/` and `scripts/` pass it for every architecture.
 - `run` refuses a DiffusionGemma file as soon as its header is read, before the tokenizer is built and the prompt
   encoded, and says that the architecture runs through `logits` only until the generation loop is wired (issue #205,
-  wiring stays in #64). `run --help` and `docs/cli.md` mark the `--eb-*` flags as having no effect yet. The
+  wiring is tracked by #277). `run --help` and `docs/cli.md` mark the `--eb-*` flags as having no effect yet. The
   entropy-bounded sampler also refuses a generation length that differs from the model's canvas length, which
   overflowed the logits buffer when smaller and moved the prompt boundary otherwise. The `check_runnable` docstring no
   longer says that no forward pass exists.
@@ -405,6 +543,103 @@ semantic versioning (0.y: minor bumps may break things).
 
 - The samplers' per-row confidence pass runs on `--threads` workers. Each
   row's arithmetic is unchanged, so tokens do not depend on the thread count.
+- The launcher tells the causes of a Hugging Face failure apart (#254). A gated repo and a missing repo keep their
+  messages. Any other HTTP status error reports the status code and says to check the repo name and `HF_TOKEN`. A
+  failure to write into the cache (a full disk, a read-only `HF_HOME`) names the cache directory. Only a transport
+  failure (refused, timed out) says "could not reach Hugging Face" and suggests `--offline`.
+- Without `:QUANT`, the launcher picks Q4_K_M, then Q4_K_S, then Q6_K, the quants the binary loads (#255). It used to
+  fall back to Q8_0 and then to the first `.gguf` in the repo, which downloaded gigabytes the binary then refused. A
+  repo with none of the three fails with the file listing and the `owner/repo:QUANT` syntax.
+- A cached model file that has not been checked against its sha256 is no longer reported as healthy (#256).
+  `pull --offline` and `setup` print `already downloaded (not verified)` and exit with status 3 (`setup` lists
+  `./mojo-dllm pull` as the outstanding step), and `doctor` marks the `model` line `!` with the pull command.
+- The launcher checks a cached file against the hub's hash at the commit the file was cached at (the name of its
+  snapshot directory, found under the repo folder's own `snapshots`, so a cache root such as `HF_HOME=/data/snapshots`
+  does not confuse it), not at the newest `main` (#257). A file that another tool cached at commit A, and that upstream
+  re-uploaded later, is kept. A file that fails its check loses its snapshot link and its blob, and a link whose target
+  lies outside the Hugging Face cache loses only the link.
+- The launcher rebuilds the binary when `pyproject.toml`, `uv.lock` or `scripts/build.sh` is newer than it, and when
+  the pinned Mojo version or the GPU architecture differs from the stamp `build/mojo-dllm.stamp` that a launcher build
+  writes (#258). A binary without a stamp is rebuilt once. A `src/` with no `.mojo` file is an error instead of a
+  fresh binary, and `doctor` says which of these made the binary stale.
+- `./mojo-dllm setup` no longer reports success on paths where a step did not happen (#259). The smoke test must print
+  text and finish within 300 seconds (a binary that exits 0 with no output, or hangs, is an error). The build step
+  checks that `build/mojo-dllm` exists. `setup --no-model` ends with `Setup complete (no smoke test).`. `setup --offline`
+  and `HF_HUB_OFFLINE=1` use the cache only, as `run` and `pull` do. Ctrl-D at the download question declines it instead
+  of printing a traceback.
+- `./mojo-dllm doctor` keeps the reason a probe failed (#260). The `toolchain` line says whether `uv run` timed out,
+  could not start or exited non-zero (with the first line of its stderr), the `gpu` line carries the `nvidia-smi` failure
+  (a driver and library mismatch is visible), an unreadable `/proc/cpuinfo` or `/proc/meminfo` is reported with the system's
+  reason instead of "no AVX2", and a cache lookup that failed names its error instead of "not in the cache". The driver
+  version comes from the same `nvidia-smi` call as the GPU list.
+- The launcher prints one error line, not a Python traceback, for the failures that were not `LauncherError` (#261): an
+  `OSError` (a read-only home directory, a full disk, a missing `bash`) names the path and the system's reason, an empty
+  `get_paths_info` answer says the hub has no such file, and Ctrl-C prints `interrupted` and exits 130. A failed write of
+  `verified.json` says that the download matched its sha256 and will be checked again. The size and mtime recorded for a
+  verified file are the ones taken before it was hashed, so a file replaced during the hash is not recorded as verified.
+- `--device auto` now names the GPU the binary will open (#262). The launcher queries the index and UUID of each card
+  and sets `CUDA_VISIBLE_DEVICES=<uuid>` and `CUDA_DEVICE_ORDER=PCI_BUS_ID` before it starts the binary (and for the
+  `setup` smoke test), so a machine with an older card first in the `nvidia-smi` list no longer prints one GPU and runs
+  on another. An explicit `--device gpu` runs the same detection, pins the first qualifying card, and prints a warning on
+  stderr when `nvidia-smi` fails, finds no card or finds only cards below compute capability 8.0. A
+  `CUDA_VISIBLE_DEVICES` the user already set is kept: the launcher does not pin the card and prints one warning line.
+- `mojo-dllm.lock` locks the dependency tree of the `./mojo-dllm` script, which `uv run --script` uses (#263). Before,
+  the first run resolved `huggingface-hub`'s transitive packages (httpx2, httpcore2, hf-xet, certifi, filelock, tqdm) at
+  their latest versions without hashes. CI and `scripts/ci-local.sh` run `uv lock --script mojo-dllm --check`, and
+  `tests/python/test_launcher_script.py` checks that the header pin equals the `huggingface-hub` version in `pyproject.toml`,
+  `uv.lock` and the script lock, that every locked package has sha256 hashes, and that the script starts.
+- The launcher refuses `--flag=value` (for example `--device=cpu` or `--steps=8`) with a message that shows the
+  two-argument form, instead of swallowing the next word as the flag's value, and `-h` and `--help` after a bare `--`
+  are part of the prompt instead of a help request, so `./mojo-dllm run -- "-h"` runs with the prompt `-h` (#264).
+- `./mojo-dllm setup` uses the CPU, and says why in the `device:` line, when `nvidia-smi` prints a listing the launcher
+  cannot read, instead of stopping with an error after the model download (`doctor` already treated that case as a
+  warning) (#267).
+- The launcher's `doctor` accepts a pinned Mojo version with a suffix (`1.1.0.dev1`) when `mojo --version` prints the
+  same suffix; it compared only the first three numbers and reported a mismatch. `nvidia-smi` rows with a non-finite or
+  non-positive compute capability or a negative memory figure are treated as unreadable (`inf` used to pass the Ampere
+  check). `./mojo-dllm help` lists `XDG_CACHE_HOME`, which the launcher reads (#269).
+- `scripts/ci-local.sh` builds `tests/gpu/test_gpu.mojo` on a machine without a GPU, as CI does, so a compile error in
+  the GPU suite stops the pre-push hook (#265). markdownlint runs over `assets/*.md` and `.github/*.md` in both gates
+  and CI installs it even after an earlier step failed. The secret
+  scan runs on `ubuntu-24.04`. `scripts/check_hygiene.sh` also refuses private key blocks and database URLs that carry
+  a password (TruffleHog's verified-only scan cannot confirm either), and stops with an error when `grep` itself fails
+  instead of reading that as a clean file.
+- The launcher tests run with `pytest -rs` and `uv run --locked` (#266). `tests/python/skip_policy.py` fails the run on
+  a skipped test that `tests/python/allowed-skips.txt` does not name (a test id and part of the skip reason), so a test
+  that stops running no longer looks like a pass. `tests/python/test_workflows.py` checks that every command `ci.yml`
+  runs is in `scripts/ci-local.sh` and the reverse (the GPU suite run aside), and runs `ci-local.sh` against stub tools to
+  check its exit code and summary lines. `docs/development.md` lists the four required checks.
+- `scripts/check_gpu_test_count.sh` compares the number of `def test_` functions in `tests/gpu/test_*.mojo` with
+  `tests/gpu/test-count.txt` in CI and in `scripts/ci-local.sh`, on every machine (#145). Before, a GPU test added
+  without re-pinning, or a file that stopped defining tests, passed both gates wherever there was no GPU.
+- The refusal of `run` on a `diffusion-gemma` file now points at #277, which tracks wiring the model into the generation
+  loop, instead of #64, which is the forward pass (written, and so is the denoiser, #65) (#270). `run` and
+  `ModelConfig.check_runnable` raise one text from one function, `gemma_run_refusal`, and `docs/cli.md`,
+  `docs/introduction.md`, `docs/model-porting.md` and `docs/benchmarks.md` use the same three numbers. `docs/cli.md` no
+  longer says that DiffusionGemma's `--json` reports `stopped_early` today.
+- Documentation facts checked against the code (#271). The source map in `docs/architecture.md` lists every file under
+  `src/` and names DiffusionGemma's loop in the sampler row. `docs/cli.md` gives the limits of `--eb-steps` (at least
+  1), `--eb-t-max` (above 0), `--eb-bound` and `--eb-confidence` (at least 0). The README, the introduction and the
+  architecture page list the eight tensor types the decoders accept in one order. The version line under the first CPU
+  table names `bdd268b` (cpu-llada) and `dd0a647` (cpu-diffuse, diffuse-cpp rows only), which
+  `scripts/bench_table.py` now renders from each result file instead of the last one read. `tests/python/test_docs_facts.py`
+  checks each of these against `src/` and `bench/results`.
+- Prose rules enforced (#272). `scripts/check_hygiene.sh` fails on an em or en dash in a tracked Markdown file (the
+  result directories under `bench/results/` are exempt: the benchmark tools write their tables), naming the file and
+  line. `docs/spec.md` had 18 and no longer does, so it joins the markdownlint run. Filler adverbs went from
+  `docs/development.md` and `ci.yml`, an en dash from `docs/model-porting.md`, and a coding tool's name from the
+  list of noisy processes in `docs/benchmarks.md`.
+- Fixtures are checked against their generators (#230). `scripts/check_fixtures.py`, a step of both gates, runs
+  `scripts/gen_fixtures.py` and `scripts/gen_moe_fixture.py` into a scratch directory (they read `FIXTURES_OUT`) and
+  fails on a file that differs by one byte, a generated file that is not tracked, or a tracked fixture that no
+  generator writes and that is not a tokenizer fixture, a tokenizer golden or `golden-generation.tsv`. The float32 files (`*.f32`, `entropy-rows.tsv`) compare
+  by value (1e-3 relative or 1e-5 absolute; another OpenBLAS core type moved tiny-llada by 4.5e-6), because a BLAS on another CPU sums in another order and the CI runner regenerated
+  different last bits than the laptop; every other file regenerates byte for byte (all 239 files pass today). The LLaDA and Dream tokenizer goldens now have the provenance file the gemma4 golden
+  had (llama.cpp commit, model file and sha256, command, golden sha256), written by `scripts/gen_tokenizer_fixture.py
+  --golden-only`; regenerating them from the local models gave the committed bytes. `scripts/run-tests.sh` drops an
+  exported `UPDATE_GOLDEN` and says so (the golden test rewrites its file and passes against its own output), unless it
+  gets `--update-golden`. `docs/development.md` lists `entropy-rows.tsv`, `utf8-cases.tsv` and
+  `tiny-diffusion-gemma.*.case`, and a test fails when a fixture is missing from its table.
 
 ## [0.1.0] - 2026-10-04
 

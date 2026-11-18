@@ -7,7 +7,7 @@ from cli.args import Args, env_flags
 from mojo_dllm.diffusion.sampler import GenConfig, GenResult
 from mojo_dllm.formats.gguf import GGUFFile
 from mojo_dllm.models.diffusion_gemma import DiffusionGemma
-from mojo_dllm.models.transformer import DiffusionLM, Timings
+from mojo_dllm.models.transformer import DiffusionLM, ModelConfig, Timings
 from mojo_dllm.sys.mem import Bytes, F32Ptr, Floats
 from mojo_dllm.sys.mmap import Mapping
 from mojo_dllm.tokenizer.bpe import Tokenizer
@@ -46,6 +46,9 @@ from main import (
     write_f32_file,
     usage,
     usage_for,
+    build_id,
+    stamped_id,
+    version_text,
 )
 
 
@@ -73,7 +76,7 @@ def test_documented_booleans_are_parsed_without_values() raises:
         assert_true(a.has(flag))
         assert_equal(len(a.unknown), 0)
         count += 1
-    assert_equal(count, 8)
+    assert_equal(count, 9)
     assert_equal(len(flags), count)
 
 
@@ -178,6 +181,16 @@ def test_usage_lists_all_commands() raises:
         assert_true(text.__contains__("mojo-dllm " + command + " "))
 
 
+def test_no_suppress_mask_is_a_run_boolean() raises:
+    var spec = command_spec("run")
+    var args = Args(
+        ["mojo-dllm", "run", "--no-suppress-mask"], spec.values, spec.booleans
+    )
+    assert_true(args.has("no-suppress-mask"))
+    assert_equal(len(args.unknown), 0)
+    assert_true(usage_for("run").__contains__("--no-suppress-mask"))
+
+
 def _parse(command: String, rest: List[String]) raises -> Args:
     var spec = command_spec(command)
     var argv = List[String](["mojo-dllm", command])
@@ -193,7 +206,7 @@ def _check(command: String, rest: List[String]) raises -> String:
 def test_every_command_declares_its_flags() raises:
     var run = command_spec("run")
     assert_equal(len(run.values), 18)
-    assert_equal(len(run.booleans), 8)
+    assert_equal(len(run.booleans), 9)
     var tokenize = command_spec("tokenize")
     assert_equal(len(tokenize.values), 2)
     assert_equal(len(tokenize.booleans), 1)
@@ -414,19 +427,29 @@ def test_help_exits_zero_and_wins_over_other_problems() raises:
     assert_equal(execute(["mojo-dllm", "--help"]), 0)
 
 
-def test_version_flag_prints_one_line_and_exits_zero() raises:
+def test_version_flag_prints_version_and_build_id_and_exits_zero() raises:
     var d = _decide("--version", [])
     assert_equal(d.code(), 0)
     assert_true(not d.is_error())
     assert_true(not d.proceeds())
-    assert_equal(d.text, version_line())
-    assert_true(not d.text.__contains__("\n"))
+    assert_equal(d.text, version_line() + "\ncommit: " + build_id())
+    assert_true(d.text.__contains__("\n"))
     assert_true(usage().startswith(version_line() + ": "))
     assert_equal(execute(["mojo-dllm", "--version"]), 0)
 
 
 def test_usage_mentions_the_version_flag() raises:
     assert_true(usage().__contains__("mojo-dllm --version"))
+
+
+def test_stamped_id_drops_the_marker_that_protects_leading_zeros() raises:
+    # scripts/build.sh puts a `g` before the id: a define made only of digits is
+    # read as a number, and `000000123456` would print as `123456`.
+    assert_equal(stamped_id("g000000123456"), "000000123456")
+    assert_equal(stamped_id("g0123456789ab-dirty"), "0123456789ab-dirty")
+    assert_equal(stamped_id("gunknown"), "unknown")
+    assert_equal(stamped_id("unknown"), "unknown")
+    assert_equal(stamped_id("abcdef012345"), "abcdef012345")
 
 
 def test_usage_errors_exit_two() raises:
@@ -630,7 +653,7 @@ def test_help_and_version_stay_on_stdout() raises:
     assert_equal(help[2], "")
     var version = _streams(["mojo-dllm", "--version"])
     assert_equal(version[0], 0)
-    assert_equal(version[1], version_line() + "\n")
+    assert_equal(version[1], version_text() + "\n")
     assert_equal(version[2], "")
 
 
@@ -1403,7 +1426,7 @@ def test_run_option_values_are_checked_before_the_model_loads() raises:
     wants.append("flag --device must be cpu or gpu, got 'foo'")
     wants.append(
         "flag --remasking must be one of low_confidence, random, entropy,"
-        " maskgit_plus, topk_margin, got 'foo'"
+        " maskgit_plus, topk_margin, origin, got 'foo'"
     )
     for i in range(len(cases)):
         var rest = base.copy()
@@ -1426,6 +1449,24 @@ def _arch_run_args(extra: List[String]) raises -> Args:
     for x in extra:
         argv.append(x)
     return Args(argv, spec.values, spec.booleans)
+
+
+def test_origin_is_a_dream_remasking_name_and_llada_refuses_it() raises:
+    var flags = List[String](
+        ["--model", "m", "--prompt", "p", "--remasking", "origin"]
+    )
+    assert_equal(_check("run", flags), "")
+    var origin = _arch_run_args(["--remasking", "origin"])
+    check_arch_flags(origin, "dream")
+    with assert_raises(contains="--remasking origin does not apply to llada"):
+        check_arch_flags(origin, "llada")
+    assert_equal(gen_config(origin).remasking, "origin")
+
+
+def test_mask_suppression_is_on_unless_the_flag_turns_it_off() raises:
+    assert_true(gen_config(_arch_run_args([])).suppress_mask)
+    var off = _arch_run_args(["--no-suppress-mask"])
+    assert_true(not gen_config(off).suppress_mask)
 
 
 def test_the_block_and_step_split_is_checked_for_llada_only() raises:
@@ -1470,8 +1511,8 @@ def test_the_block_and_step_split_is_checked_for_llada_only() raises:
         ),
         "llada",
     )
-    # Dream reads neither flag, and the benchmark scripts pass --block-length
-    # for every architecture: a run that was accepted stays accepted.
+    # Dream has no blocks: the flag check lets --block-length through (it is
+    # the architecture's job) and `check_arch_flags` refuses it for Dream.
     var dream = _arch_run_args(
         ["--max-tokens", "100", "--steps", "100", "--block-length", "32"]
     )
@@ -1493,7 +1534,10 @@ def test_the_block_and_step_split_is_checked_for_llada_only() raises:
         ),
         "",
     )
-    check_arch_flags(dream, "dream")
+    with assert_raises(
+        contains="--block-length applies to llada only, not dream"
+    ):
+        check_arch_flags(dream, "dream")
     # No --block-length: the default 32 depends on the architecture.
     with assert_raises(
         contains=(
@@ -1558,8 +1602,7 @@ def test_remasking_must_suit_the_architecture_before_the_model_loads() raises:
         spec.values,
         spec.booleans,
     )
-    with assert_raises(contains="--remasking random does not apply to dream"):
-        check_arch_flags(random, "dream")
+    check_arch_flags(random, "dream")
     check_arch_flags(random, "llada")
 
 
@@ -1681,10 +1724,35 @@ def test_run_refuses_a_diffusion_gemma_file_before_the_tokenizer_is_built() rais
     with assert_raises(
         contains=(
             "diffusion-gemma does not run on this model: `run` waits for the"
-            " generation loop (#64), so use `logits` (CPU) until then"
+            " model to be wired into the generation loop (#277), so use"
+            " `logits` (CPU) until then"
         )
     ):
         cmd_run(a)
+
+
+def test_both_refusals_of_a_diffusion_gemma_run_say_the_same() raises:
+    # `run` stops in main before any parse work, and `check_runnable` stops a
+    # model that is built anyway (the GPU path). One text, so a reader sees
+    # one issue number.
+    var spec = command_spec("run")
+    var a = Args(
+        ["x", "run", "--model", DG_TINY, "--prompt", "hi"],
+        spec.values,
+        spec.booleans,
+    )
+    var from_run = String("")
+    try:
+        cmd_run(a)
+    except e:
+        from_run = String(e)
+    var from_config = String("")
+    try:
+        ModelConfig(GGUFFile(DG_TINY)).check_runnable()
+    except e:
+        from_config = String(e)
+    assert_true(from_run.byte_length() > 0)
+    assert_equal(from_run, from_config)
 
 
 def test_run_help_says_the_entropy_bound_flags_have_no_effect_yet() raises:
@@ -1692,7 +1760,7 @@ def test_run_help_says_the_entropy_bound_flags_have_no_effect_yet() raises:
     assert_true(
         text.__contains__(
             "the eb-* flags have no effect until run accepts"
-            " diffusion-gemma (#64)"
+            " diffusion-gemma (#277)"
         )
     )
 
@@ -1703,6 +1771,7 @@ def test_dream_refuses_the_flags_that_only_llada_reads() raises:
     cases.append(["--full-logits"])
     cases.append(["--threshold", "0.5"])
     cases.append(["--dual-cache"])
+    cases.append(["--block-length", "32"])
     for given in cases:
         var argv = List[String](["x", "run", "--prompt", "p"])
         for g in given:

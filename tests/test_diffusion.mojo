@@ -12,6 +12,7 @@ from mojo_dllm.diffusion.sampler import (
     _confidence_from_stats,
     _greedy_rows,
     _gumbel_argmax,
+    _prob_of,
     StepObserver,
     generate_observed,
 )
@@ -26,6 +27,7 @@ from mojo_dllm.models.transformer import (
 from mojo_dllm.sys.mem import F32Ptr, Floats
 
 comptime FIX = "tests/fixtures/"
+comptime TINY_DREAM_MASK = 510
 
 
 def test_transfer_schedule_matches_generate_py() raises:
@@ -914,6 +916,403 @@ def test_dream_commits_its_schedule_in_confidence_order() raises:
     _assert_list(m.asked[1], [1, 3, 4], "rows of step 2")
     _assert_list(m.asked[2], [3, 4], "rows of step 3")
     _assert_list(r.tokens, [1, 2, 7, 6, 6, 1], "final canvas")
+
+
+def _check_mask_score_row(mask_id: Int, runner_up: Int) raises:
+    var vocab = 700
+    var logits = Floats(vocab)
+    for v in range(vocab):
+        logits[v] = -5.0
+    logits[runner_up] = 5.0
+    logits[mask_id] = 10.0
+    var row = logits.ptr()
+
+    var plain = argmax_and_prob(row, vocab)
+    assert_equal(plain[0], mask_id, "unsuppressed positional call")
+
+    var z = 1.0 + Float64(vocab - 2) * exp(Float64(-10.0))
+    var expected_p = 1.0 / z
+    var expected_other_p = exp(Float64(-10.0)) / z
+    var expected_entropy = expected_p * log(expected_p) + Float64(
+        vocab - 2
+    ) * expected_other_p * log(expected_other_p)
+    var expected_margin = expected_p - expected_other_p
+
+    var argmax = argmax_and_prob(row, vocab, mask_id)
+    assert_equal(argmax[0], runner_up)
+    assert_true(abs(argmax[1] - expected_p) < 1e-12)
+
+    var probability = _prob_of(row, vocab, runner_up, mask_id)
+    assert_true(abs(probability - expected_p) < 1e-12)
+
+    var plus = _confidence(row, vocab, "maskgit_plus", mask_id)
+    assert_equal(plus[0], runner_up)
+    assert_true(abs(plus[1] - expected_p) < 1e-12)
+
+    var margin = _confidence(row, vocab, "topk_margin", mask_id)
+    assert_equal(margin[0], runner_up)
+    assert_true(abs(margin[1] - expected_margin) < 1e-12)
+
+    var entropy = _confidence(row, vocab, "entropy", mask_id)
+    assert_equal(entropy[0], runner_up)
+    assert_true(
+        abs(entropy[1] - expected_entropy) < 1e-9,
+        "entropy "
+        + String(entropy[1])
+        + " against allowed-row value "
+        + String(expected_entropy),
+    )
+
+    var greedy = _greedy_rows(row, [0], vocab, "llada", 1, mask_id)
+    assert_equal(greedy[0][0], runner_up)
+    assert_true(abs(greedy[1][0] - expected_p) < 1e-12)
+
+    var greedy_plus = _greedy_rows(row, [0], vocab, "maskgit_plus", 1, mask_id)
+    assert_equal(greedy_plus[0][0], runner_up)
+    assert_true(abs(greedy_plus[1][0] - expected_p) < 1e-12)
+
+
+def test_mask_token_is_excluded_from_greedy_scores() raises:
+    # Include index 0 and the final index to cover scorers' old start values.
+    _check_mask_score_row(0, 350)
+    _check_mask_score_row(350, 0)
+    _check_mask_score_row(699, 350)
+
+
+def _check_gumbel_mask(mask_id: Int) raises:
+    var vocab = 700
+    var runner_up = 0 if mask_id != 0 else 1
+    var logits = Floats(vocab)
+    for v in range(vocab):
+        logits[v] = -100.0
+    logits[runner_up] = 0.0
+    logits[mask_id] = 1000.0
+    var suppressed_rng = Rng(991)
+    var plain_rng = Rng(991)
+    var selected = _gumbel_argmax(
+        logits.ptr(), vocab, 1.0, suppressed_rng, mask_id
+    )
+    var plain = _gumbel_argmax(logits.ptr(), vocab, 1.0, plain_rng)
+    assert_equal(plain, mask_id)
+    assert_true(selected != mask_id, "mask candidate won Gumbel sampling")
+    assert_equal(suppressed_rng.next_u64(), plain_rng.next_u64())
+
+
+def test_gumbel_mask_skip_preserves_rng_draws() raises:
+    _check_gumbel_mask(0)
+    _check_gumbel_mask(350)
+    _check_gumbel_mask(699)
+
+
+def test_mask_suppression_preserves_fixture_generations() raises:
+    var defaults = GenConfig()
+    assert_true(defaults.suppress_mask, "mask suppression should default on")
+    for path in ["tiny-llada.gguf", "tiny-dream.gguf"]:
+        var model = DiffusionLM(FIX + path, threads=2, max_tokens=16)
+        var prompt: List[Int] = [5, 17, 300]
+        var on = _tiny_cfg()
+        on.suppress_mask = True
+        var off = on.copy()
+        off.suppress_mask = False
+        var suppressed = generate(model, prompt, on)
+        var unchanged = generate(model, prompt, off)
+        assert_equal(suppressed.forward_passes, unchanged.forward_passes)
+        assert_equal(len(suppressed.tokens), len(unchanged.tokens))
+        for i in range(len(suppressed.tokens)):
+            assert_equal(
+                suppressed.tokens[i],
+                unchanged.tokens[i],
+                path + " position " + String(i),
+            )
+
+
+struct MaskPreferringModel(DenoisingModel, Movable):
+    """A model whose logits always favour the mask token, so a loop that
+    ignores `suppress_mask` leaves masks in the canvas."""
+
+    var cfg: ModelConfig
+    var timing: Timings
+    var device_stats: Bool
+    var top_token: Int
+    var top_logit: Float32
+    var mask_by_row: List[Float32]
+
+    def __init__(out self, path: String, device_stats: Bool = False) raises:
+        var gguf = GGUFFile(path)
+        self.cfg = ModelConfig(gguf)
+        self.timing = Timings()
+        self.device_stats = device_stats
+        self.top_token = -1
+        self.top_logit = 0.0
+        self.mask_by_row = List[Float32]()
+
+    def config(self) -> ModelConfig:
+        return self.cfg
+
+    def logit_row(self, position: Int) -> Int:
+        if self.cfg.shift_logits:
+            return max(position - 1, 0)
+        return position
+
+    def _write(self, out_rows: List[Int], logits: F32Ptr):
+        for j in range(len(out_rows)):
+            var row = logits.unsafe_offset(j * self.cfg.vocab)
+            for token in range(self.cfg.vocab):
+                row.unsafe_store(token, -5.0)
+            if self.top_token >= 0:
+                row.unsafe_store(self.top_token, self.top_logit)
+            var mask_logit = Float32(10.0)
+            if j < len(self.mask_by_row):
+                mask_logit = self.mask_by_row[j]
+            row.unsafe_store(self.cfg.mask_id, mask_logit)
+
+    def forward(
+        mut self, tokens: List[Int], out_rows: List[Int], logits: F32Ptr
+    ) raises:
+        self._write(out_rows, logits)
+
+    def forward_window(
+        mut self,
+        tokens: List[Int],
+        lo: Int,
+        hi: Int,
+        out_rows: List[Int],
+        logits: F32Ptr,
+    ) raises:
+        self._write(out_rows, logits)
+
+    def device_row_stats(self) -> Bool:
+        return self.device_stats
+
+    def forward_stats(
+        mut self, tokens: List[Int], out_rows: List[Int], mut out: RowStats
+    ) raises:
+        raise Error("device statistics path used")
+
+    def model_name(self) raises -> String:
+        return "mask-preferring test model"
+
+    def load_time(self) -> Float64:
+        return 0.0
+
+    def stats(self) -> Timings:
+        return self.timing
+
+
+def _check_mask_suppression_wiring(path: String, temperature: Float64) raises:
+    var model = MaskPreferringModel(FIX + path)
+    var mask_id = model.config().mask_id
+    var prompt: List[Int] = [5, 17, 300]
+    var c = GenConfig()
+    c.gen_length = 8
+    c.block_length = 4
+    c.steps = 4
+    c.temperature = temperature
+    var suppressed = generate(model, prompt, c)
+    for i in range(len(prompt), len(suppressed.tokens)):
+        assert_true(
+            suppressed.tokens[i] != mask_id,
+            path + ": suppression left a mask at position " + String(i),
+        )
+    var off = c.copy()
+    off.suppress_mask = False
+    var unsuppressed = generate(model, prompt, off)
+    var masks_left = 0
+    for i in range(len(prompt), len(unsuppressed.tokens)):
+        if unsuppressed.tokens[i] == mask_id:
+            masks_left += 1
+    assert_true(masks_left > 0, path + ": the opt-out left no masks")
+
+
+def test_llada_suppression_leaves_no_mask_at_temperature_zero() raises:
+    _check_mask_suppression_wiring("tiny-llada.gguf", 0.0)
+
+
+def test_llada_suppression_leaves_no_mask_with_gumbel_noise() raises:
+    # Only temperature above 0 passes the mask id to the Gumbel argmax.
+    _check_mask_suppression_wiring("tiny-llada.gguf", 0.5)
+
+
+def test_dream_suppression_leaves_no_mask() raises:
+    _check_mask_suppression_wiring("tiny-dream.gguf", 0.0)
+
+
+def test_llada_confidence_leaves_the_mask_out_of_the_normalizer() raises:
+    # The two canvas rows differ only in the mask logit: 60 on the first and
+    # -50 on the second. With the mask excluded both confidences are 1.0 and
+    # the lower position commits first. A mask counted in the normalizer would
+    # give the first row a confidence near 0 and commit the second position.
+    var model = MaskPreferringModel(FIX + "tiny-llada.gguf")
+    model.top_token = 7
+    model.top_logit = 40.0
+    model.mask_by_row = [60.0, -50.0]
+    var prompt: List[Int] = [5, 17, 300]
+    var c = GenConfig()
+    c.gen_length = 2
+    c.block_length = 2
+    c.steps = 2
+    c.temperature = 0.5
+    var recorder = FirstCommit()
+    _ = generate_observed(model, prompt, c, recorder)
+    var mask_id = model.config().mask_id
+    assert_equal(recorder.step_one_commits, 1)
+    assert_true(
+        recorder.step_one_tokens[len(prompt)] != mask_id,
+        "the first canvas position commits first",
+    )
+    assert_equal(recorder.step_one_tokens[len(prompt) + 1], mask_id)
+
+
+def _check_device_statistics_gate(path: String) raises:
+    # Device row statistics include the mask, so suppression bypasses them;
+    # the opt-out uses them again.
+    var model = MaskPreferringModel(FIX + path, True)
+    var prompt: List[Int] = [5, 17, 300]
+    var c = GenConfig()
+    c.gen_length = 8
+    c.block_length = 4
+    c.steps = 4
+    var r = generate(model, prompt, c)
+    assert_equal(len(r.tokens), 11)
+    var off = c.copy()
+    off.suppress_mask = False
+    with assert_raises(contains="device statistics path used"):
+        _ = generate(model, prompt, off)
+
+
+def test_llada_suppression_bypasses_device_row_statistics() raises:
+    _check_device_statistics_gate("tiny-llada.gguf")
+
+
+def test_dream_suppression_bypasses_device_row_statistics() raises:
+    _check_device_statistics_gate("tiny-dream.gguf")
+
+
+def test_prob_of_the_excluded_mask_token_is_zero() raises:
+    var vocab = 8
+    var logits = Floats(vocab)
+    for v in range(vocab):
+        logits[v] = Float32(v)
+    assert_equal(_prob_of(logits.ptr(), vocab, 3, 3), 0.0)
+    assert_true(_prob_of(logits.ptr(), vocab, 3, 4) > 0.0)
+
+
+struct FirstCommit(StepObserver):
+    var step_one_commits: Int
+    var step_one_tokens: List[Int]
+
+    def __init__(out self):
+        self.step_one_commits = -1
+        self.step_one_tokens = List[Int]()
+
+    def on_step(
+        mut self, tokens: List[Int], committed: List[Int], step: Int, total: Int
+    ) raises:
+        if step == 1:
+            self.step_one_commits = len(committed)
+            self.step_one_tokens = tokens.copy()
+
+
+def _dream_cfg(gen_length: Int, steps: Int, seed: Int) -> GenConfig:
+    var c = GenConfig()
+    c.gen_length = gen_length
+    c.steps = steps
+    c.seed = seed
+    c.remasking = "origin"
+    return c^
+
+
+def test_dream_origin_commits_everything_on_final_step() raises:
+    var model = DiffusionLM(FIX + "tiny-dream.gguf", threads=2, max_tokens=16)
+    var prompt: List[Int] = [5, 17, 300]
+    var c = _dream_cfg(8, 1, 42)
+    # Keep the normal transfer probability below one; the last step must
+    # explicitly override it to one.
+    c.eps = 0.9
+    var recorder = FirstCommit()
+    var result = generate_observed(model, prompt, c, recorder)
+    assert_equal(result.forward_passes, 1)
+    assert_equal(recorder.step_one_commits, 8)
+    for i in range(len(prompt), len(result.tokens)):
+        assert_true(
+            result.tokens[i] != TINY_DREAM_MASK, "mask left at " + String(i)
+        )
+
+
+def test_dream_origin_first_step_matches_binomial_mean() raises:
+    var model = DiffusionLM(FIX + "tiny-dream.gguf", threads=2, max_tokens=70)
+    var prompt: List[Int] = [5, 17, 300]
+    var total_first_step = 0
+    for seed in range(200):
+        var c = _dream_cfg(64, 4, seed)
+        c.eps = 1e-3
+        var recorder = FirstCommit()
+        _ = generate_observed(model, prompt, c, recorder)
+        total_first_step += recorder.step_one_commits
+    var mean = Float64(total_first_step) / 200.0
+    print("origin step-one mean over 200 seeds:", mean)
+    assert_true(
+        abs(mean - 15.98) < 1.0,
+        "origin step-one mean " + String(mean) + " against 15.98",
+    )
+
+
+def test_dream_origin_and_random_are_seeded_and_resolve_masks() raises:
+    var model = DiffusionLM(FIX + "tiny-dream.gguf", threads=2, max_tokens=70)
+    var prompt: List[Int] = [5, 17, 300]
+    for algorithm in ["origin", "random"]:
+        var c = _dream_cfg(64, 4, 2026)
+        c.remasking = algorithm
+        var a = generate(model, prompt, c)
+        var b = generate(model, prompt, c)
+        assert_equal(a.forward_passes, b.forward_passes, algorithm)
+        for i in range(len(a.tokens)):
+            assert_equal(
+                a.tokens[i], b.tokens[i], algorithm + " position " + String(i)
+            )
+            if i >= len(prompt):
+                assert_true(
+                    a.tokens[i] != TINY_DREAM_MASK, algorithm + " left a mask"
+                )
+
+    var recorder = FirstCommit()
+    var random_cfg = _dream_cfg(64, 4, 2026)
+    random_cfg.remasking = "random"
+    _ = generate_observed(model, prompt, random_cfg, recorder)
+    assert_equal(recorder.step_one_commits, 15)
+    var expected_rng = Rng(2026)
+    var scores = List[Float64]()
+    for _ in range(64):
+        scores.append(expected_rng.uniform())
+    var expected_positions = select_top(scores, 15)
+    for j in range(64):
+        var expected = False
+        for selected in expected_positions:
+            if selected == j:
+                expected = True
+        var committed = (
+            recorder.step_one_tokens[len(prompt) + j] != TINY_DREAM_MASK
+        )
+        assert_equal(
+            committed,
+            expected,
+            "random step-one position " + String(j),
+        )
+
+
+def test_remasking_names_are_model_specific() raises:
+    var prompt: List[Int] = [5, 17, 300]
+    var llada = DiffusionLM(FIX + "tiny-llada.gguf", threads=2, max_tokens=16)
+    var c = _tiny_cfg()
+    c.remasking = "origin"
+    with assert_raises(contains="unknown remasking strategy"):
+        _ = generate(llada, prompt, c)
+
+    var dream = DiffusionLM(FIX + "tiny-dream.gguf", threads=2, max_tokens=16)
+    c = _dream_cfg(8, 4, 42)
+    c.remasking = "unknown"
+    with assert_raises(contains="unknown Dream algorithm"):
+        _ = generate(dream, prompt, c)
 
 
 def main() raises:

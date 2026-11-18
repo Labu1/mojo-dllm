@@ -11,7 +11,9 @@ mojo-dllm logits   --model PATH --tokens IDS --rows POSITIONS --out FILE [--thre
 This page describes the binary, `build/mojo-dllm`. The `./mojo-dllm run` launcher
 takes the prompt as its first word, accepts `-m` for `--model`, defaults
 `--device` to `auto` and passes the other flags on to the binary; see the
-[Quick start](quickstart.md).
+[Quick start](quickstart.md). A `CUDA_VISIBLE_DEVICES` you set before the launcher
+starts is kept: the launcher then does not pin the card and prints one warning
+saying so.
 
 `mojo-dllm COMMAND --help` (or `-h`) prints that command's usage and exits 0.
 Help wins over every other problem in the arguments, wherever it appears, except
@@ -20,8 +22,19 @@ as the value of a flag (`--prompt --help` sets the prompt to `--help`).
 command. Each command declares its flags: a flag the command does not declare
 stops the run (see [Errors](#errors)).
 
-`mojo-dllm --version` prints one line, `mojo-dllm` and the version, and exits
-0. The same version is the `"version"` key of `run --json`.
+`mojo-dllm --version` prints the package version on its first line and the
+commit the binary was built from on its second, then exits 0:
+
+```text
+mojo-dllm 0.2.0
+commit: abc123456789
+```
+
+The package version is the `"version"` key of `run --json`. The commit is the
+12-character `HEAD` of the checkout the binary was built from, with a `-dirty`
+suffix when `src/` had pending changes, or `unknown` when the build cannot read
+Git metadata. A binary keeps reporting the commit it was built from after
+`HEAD` moves; rebuild to stamp the new one.
 
 ## `run`
 
@@ -31,30 +44,31 @@ stops the run (see [Errors](#errors)).
 | `--prompt TEXT` | required | the user message |
 | `--max-tokens N` | 128 | tokens to generate (the masked canvas). The prompt tokens plus N must not exceed the file's `<arch>.context_length` (4096 when the key is absent); the check runs after the header is read and before any weight is mapped |
 | `--steps N` | `--max-tokens` | denoising steps; a multiple of the block count |
-| `--block-length N` | 32, or `--max-tokens` when that is smaller | LLaDA's semi-autoregressive block size; must divide `--max-tokens`. Dream ignores it |
+| `--block-length N` | 32, or `--max-tokens` when that is smaller | LLaDA's semi-autoregressive block size; must divide `--max-tokens`. A Dream run refuses it |
 | `--temperature T` | 0 | LLaDA: 0 is greedy; above 0 adds Gumbel noise as LLaDA does. Dream supports only 0 and stops with an error above it |
-| `--remasking S` | `low_confidence` | LLaDA: `low_confidence` or `random`. Dream: `entropy` (the default), `maskgit_plus`, `topk_margin` |
+| `--remasking S` | `low_confidence` | LLaDA: `low_confidence` or `random`. Dream: `entropy` (the default), `maskgit_plus`, `topk_margin`, `origin`, or llama.cpp-style `random` |
 | `--threshold P` | 0 (off) | A number from 0 to 1. LLaDA: each step also commits every masked token whose confidence is at least P, so easy blocks finish in fewer steps (Fast-dLLM's parallel decoding). A step still commits at least what the schedule says. Not exact: see [Benchmarks](benchmarks.md#steps-and-quality) for its measured effect on accuracy |
 | `--dual-cache` | off | LLaDA: cache every position's keys and values and, inside a block, recompute only that block's rows (Fast-dLLM's DualCache). The cache is refreshed at the first step of each block. Not exact: the prompt and later blocks see keys from the block's first step; see [Benchmarks](benchmarks.md#steps-and-quality) for its measured effect on accuracy. Cannot combine with `--full-logits` |
 | `--seed N` | 42 | seeds this program's PRNG (it does not reproduce a PyTorch run). It fixes DiffusionGemma's random canvas and draws as well |
-| `--eb-steps N` | 48 | DiffusionGemma: most denoising steps (use it instead of `--steps`, which that model refuses) (no effect until `run` accepts DiffusionGemma, #64) |
-| `--eb-t-min T` | 0.4 | DiffusionGemma: the temperature the schedule approaches, 0 or more; the last of `--eb-steps` steps runs at `T + (t-max - T) / steps` (no effect until `run` accepts DiffusionGemma, #64) |
-| `--eb-t-max T` | 0.8 | DiffusionGemma: the temperature of the first step; it falls linearly from there (no effect until `run` accepts DiffusionGemma, #64) |
-| `--eb-bound B` | 0.1 | DiffusionGemma: a position is accepted while the entropies of the lower-entropy positions before it sum to at most B (no effect until `run` accepts DiffusionGemma, #64) |
-| `--eb-stability N` | 1 | DiffusionGemma: steps the argmax canvas must hold before the run may stop; 0 or more, and 0 lets the first step stop it (no effect until `run` accepts DiffusionGemma, #64) |
-| `--eb-confidence C` | 0.005 | DiffusionGemma: the run may stop once the mean entropy over the canvas is below C (no effect until `run` accepts DiffusionGemma, #64) |
+| `--eb-steps N` | 48 | DiffusionGemma: most denoising steps, at least 1 (use it instead of `--steps`, which that model refuses) (no effect yet, see the paragraph after the table) |
+| `--eb-t-min T` | 0.4 | DiffusionGemma: the temperature the schedule approaches, 0 or more; the last of `--eb-steps` steps runs at `T + (t-max - T) / steps` (no effect yet, see the paragraph after the table) |
+| `--eb-t-max T` | 0.8 | DiffusionGemma: the temperature of the first step, above 0; it falls linearly from there (no effect yet, see the paragraph after the table) |
+| `--eb-bound B` | 0.1 | DiffusionGemma: a position is accepted while the entropies of the lower-entropy positions before it sum to at most B, which must be at least 0 (no effect yet, see the paragraph after the table) |
+| `--eb-stability N` | 1 | DiffusionGemma: steps the argmax canvas must hold before the run may stop; 0 or more, and 0 lets the first step stop it (no effect yet, see the paragraph after the table) |
+| `--eb-confidence C` | 0.005 | DiffusionGemma: the run may stop once the mean entropy over the canvas is below C, which must be at least 0 (no effect yet, see the paragraph after the table) |
 | `--threads N` | all logical CPUs | worker threads of every parallel CPU loop, including the activation quantization and the weight repack at load (with `--device gpu`, only the sampler uses them) |
 | `--device D` | `cpu` | `cpu`, or `gpu` for an NVIDIA GPU with compute capability 8.0 or newer |
 | `--no-chat` | off | skip the chat template |
 | `--full-logits` | off | LLaDA: compute logits for every position, as a generic runtime would (for benchmarking). Dream refuses it |
+| `--no-suppress-mask` | off | allow the mask token as a sampled answer for parity experiments; by default it is excluded from argmax and the softmax normalizer |
 | `--no-early-stop` | off | run every step even after the answer is final (the benchmark and parity harnesses use it) |
 | `--visual` | off | show the canvas: masked positions as teal blocks, tokens committed in that step in bold orange when colour is enabled |
 | `--visual-interval N` | 1 | redraw every N steps and at the final step; requires `--visual` and N at least 1 |
 | `--verbose` | off | model, device and load time before the text; step timings and peak memory after it |
 | `--dump-step-stats` | off | one line per denoising step |
-| `--json` | off | one JSON object with timings, tokens and text. `peak_rss_bytes` is `null` when the operating system could not report it, never 0. `remasking` names the strategy the run used (for Dream, `entropy` when the flag says `low_confidence`); `block_length` and `full_logits` appear for LLaDA only, because Dream reads neither. `steps_taken` counts the denoising steps run and `stop_reason` says why the loop ended: `complete`, `answer_fixed` (early stop), or for DiffusionGemma `converged` or `max_steps` |
+| `--json` | off | one JSON object with timings, tokens and text. `peak_rss_bytes` is `null` when the operating system could not report it, never 0. `remasking` names the strategy the run used (for Dream, `entropy` when the flag says `low_confidence`); `block_length` and `full_logits` appear for LLaDA only, because Dream reads neither. `steps_taken` counts the denoising steps run and `stop_reason` says why the loop ended: `complete`, `answer_fixed` (early stop), or for DiffusionGemma, once `run` accepts it (#277), `converged` or `max_steps` |
 
-The flags `--threshold`, `--dual-cache` and `--full-logits` are LLaDA's; a Dream run refuses them by name before the model loads (`--threshold applies to llada only, not dream`). Dream also reads no `--block-length`, but still accepts it, because the benchmark and parity scripts pass it for every architecture.
+The flags `--threshold`, `--dual-cache`, `--full-logits` and `--block-length` are LLaDA's; a Dream run refuses them by name before the model loads (`--threshold applies to llada only, not dream`).
 
 The printed answer ends at the first end-of-text or end-of-turn token in the
 canvas. Generation stops as soon as that answer is final: once the first
@@ -63,7 +77,21 @@ such a token, no later step can change the printed text, because steps only
 fill masked positions. The result is the same text with fewer steps, and
 `--json` reports `"stopped_early": true`. `--no-early-stop` runs every step.
 
-The `--eb-*` flags belong to DiffusionGemma and every other model refuses them by name. `run` itself refuses a DiffusionGemma file once its header is read, before the tokenizer is built, with `diffusion-gemma does not run on this model: ... use logits (CPU) until then` (the generation loop is wired to the model in #64), so the `--eb-*` flags have no effect yet; `run --help` says so. `logits` runs that architecture. DiffusionGemma's `--json` reports `"stopped_early": true` when the stop rule ended the run before `--eb-steps` steps.
+Dream's `origin` follows its Python reference: each masked position commits
+independently with probability `1 - s/t`, forced to 1 at the final step. Zero
+commits in an intermediate step is valid. This differs from llama.cpp's
+`origin`, which floors the transfer count before calculating the probability.
+Dream `random` follows llama.cpp: assign each candidate a uniform random
+confidence, then select the scheduled top-k positions. Both rules use `--seed`.
+The default remains `entropy` for Dream; select `--remasking origin` to use
+Dream's reference algorithm.
+
+Mask suppression keeps the Gumbel RNG draw for the excluded token, so toggling
+it does not shift the random stream. On GPU, suppression uses full logits
+because the device row statistics include the mask. `--no-suppress-mask`
+retains the existing device reduction path when its other conditions hold.
+
+The `--eb-*` flags belong to DiffusionGemma and every other model refuses them by name. The parser accepts them, but `run` stops on a `diffusion-gemma` file until the model is wired into the generation loop (see [Introduction](introduction.md)). It refuses the file once its header is read, before the tokenizer is built, with ``diffusion-gemma does not run on this model: `run` waits for the model to be wired into the generation loop (#277), so use `logits` (CPU) until then``, so the `--eb-*` flags have no effect yet; `run --help` says so. Only `logits` runs that architecture. The forward pass (#64) and the entropy-bounded loop (#65) are written; #277 tracks joining them. Once it lands, DiffusionGemma's `--json` reports `"stopped_early": true` when the stop rule ends the run before `--eb-steps` steps.
 
 ### Visual output
 
@@ -89,14 +117,14 @@ the command stops with the usage error `--json cannot be combined with --visual`
 `--json`, stdout holds the one JSON object and nothing else.
 
 The checks that need only the flags run before the model file is opened, and each exits with status 2 and names the flag:
-`--threshold` outside 0 to 1 or not finite, `--device` other than `cpu` or `gpu`, `--remasking` outside the five names
+`--threshold` outside 0 to 1 or not finite, `--device` other than `cpu` or `gpu`, `--remasking` outside the six names
 above, and `--threshold` above 0 with `--remasking random`. LLaDA also needs a `--block-length` that divides
 `--max-tokens` and a `--steps` that is a multiple of the number of blocks (Dream reads neither flag and accepts any
 value); that check depends on the architecture, which only the file's header says, so it runs once the header is read,
 still before any weight is mapped, and exits with status 1, as does the check of the default block length (32, or
 `--max-tokens` when smaller): `flag --max-tokens 100 is not a multiple of the default block
-length 32`. The same header check refuses a `--remasking` value that the file's architecture does not take (`entropy`,
-`maskgit_plus` and `topk_margin` for LLaDA, `random` for Dream).
+length 32`. The same header check refuses a `--remasking` value that LLaDA does not take (`entropy`, `maskgit_plus`,
+`topk_margin` and `origin`); Dream takes all six.
 
 Invalid `--visual-interval` values and use without `--visual` exit with status
 1 before model loading. The messages name `--visual-interval`: `must be at
@@ -188,7 +216,7 @@ stderr, so stdout stays free for the answer or the JSON object; help text and
 | `ERROR: flag --prompt needs a value, got the flag --verbose` | A value flag is followed by the name of a declared flag, which is almost always a forgotten value. `--help` stays a legal value |
 | `ERROR: flag --steps is given twice` | A value flag appears twice; the command no longer keeps the last silently. A boolean flag repeated is harmless |
 | `ERROR: flag --rows needs comma-separated integers, got '0,,2'` | An empty entry in `--tokens` or `--rows` (a trailing comma stays legal) |
-| `ERROR: flag --steps must be at least 1, got 0` | `--max-tokens`, `--steps`, `--block-length` and `--threads` need at least 1, and `--temperature` at least 0. `--threshold` needs a number from 0 to 1 and `--prev-temp-inv` one above 0. The check runs before the model is mapped |
+| `ERROR: flag --steps must be at least 1, got 0` | `--max-tokens`, `--steps`, `--block-length`, `--threads` and `--eb-steps` need at least 1, and `--eb-stability` at least 0. `--temperature`, `--eb-t-min`, `--eb-bound` and `--eb-confidence` need a finite number of at least 0, `--eb-t-max` and `--prev-temp-inv` one above 0 (not only finite), and `--threshold` a number from 0 to 1. The check runs before the model is mapped |
 | `ERROR: prompt 10 + --max-tokens 4096 = 4106 exceeds the context length 4096 (llada.context_length)` | The canvas is longer than the file's context length. Lower `--max-tokens`. Exit status 1, before any weight is mapped |
 | `ERROR: cannot open model file PATH: No such file or directory` | The path is wrong. The reason is the operating system's. The next line is `to download a model, run: ./mojo-dllm pull` |
 | `ERROR: cannot open model file PATH: Permission denied` | The open failed for a reason other than a missing file, such as `Not a directory`. The operating system names the reason. No download hint follows, because `pull` would not fix it |
