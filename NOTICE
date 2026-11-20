@@ -25,7 +25,7 @@ llama.cpp (MIT, Copyright (c) 2023-2026 The ggml authors)
 
 scripts/verify-action-pins.sh, scripts/action-pin-comments.py, scripts/github_yaml.py,
 scripts/check_hygiene.sh, CODE_OF_CONDUCT.md (adapted)
-  From lacs-project/sysknife and vladimirrott/maintainer-agent, MIT,
+  From lacs-project/sysknife and agentsmith-tools/maintainer-agent, MIT,
   Copyright (c) 2026 Vladimir Rotariu. CODE_OF_CONDUCT.md is the Contributor
   Covenant, version 2.1.
 

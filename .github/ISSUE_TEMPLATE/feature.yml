@@ -6,7 +6,7 @@ body:
     attributes:
       value: |
         Changes that make a forward pass faster, a format better supported, or a number better verified are the ones
-        that land (see [CONTRIBUTING.md](https://github.com/vladimirrott/mojo-dllm/blob/main/CONTRIBUTING.md)).
+        that land (see [CONTRIBUTING.md](https://github.com/dllm-labs/mojo-dllm/blob/main/CONTRIBUTING.md)).
   - type: textarea
     id: what
     attributes:

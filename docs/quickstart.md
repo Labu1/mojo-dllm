@@ -9,7 +9,7 @@ goes system-wide.
 
 ```bash
 curl -LsSf https://astral.sh/uv/install.sh | sh    # skip if you have uv
-git clone https://github.com/vladimirrott/mojo-dllm
+git clone https://github.com/dllm-labs/mojo-dllm
 cd mojo-dllm
 ./mojo-dllm setup
 ```

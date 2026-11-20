@@ -104,7 +104,7 @@ each output by the expert scale and the token's router weight.
 
 The tiny MoE tests compare routing and final outputs with a separate scalar
 reference, including mixed K-quant gate/up and 32-weight-block down matrices.
-The [MoE benchmark](https://github.com/vladimirrott/mojo-dllm/blob/main/bench/MOE.md) measures a complete synthetic layer at
+The [MoE benchmark](https://github.com/dllm-labs/mojo-dllm/blob/main/bench/MOE.md) measures a complete synthetic layer at
 the intended model dimensions and retains its raw timing samples.
 
 ## The GPU path
