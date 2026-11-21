@@ -31,7 +31,7 @@ remasking the algorithm is deterministic and token-for-token comparable with
 the reference.
 """
 
-from std.math import exp, isfinite, log
+from std.math import exp, isfinite, log, nan
 from std.time import perf_counter_ns
 
 from mojo_dllm.models.transformer import DenoisingModel, RowStats
@@ -40,13 +40,18 @@ from mojo_dllm.sys.parallel import parallel_for
 
 
 struct GenConfig(Copyable, Movable):
+    """Sampling options. Mask suppression is on by default. Dream keeps the
+    entropy default; origin uses independent transfers, random ranks uniforms.
+    """
+
     var gen_length: Int
     var block_length: Int
     var steps: Int
     var temperature: Float64
     var remasking: String
     var seed: Int
-    var mask_id: Int
+    var suppress_mask: Bool
+    """Exclude mask_id from token selection and softmax; disable for parity."""
     var full_logits: Bool
     var eps: Float64
     """Dream's final timestep: timesteps run linspace(1, eps, steps + 1)."""
@@ -87,7 +92,7 @@ struct GenConfig(Copyable, Movable):
         self.temperature = 0.0
         self.remasking = "low_confidence"
         self.seed = 42
-        self.mask_id = 126336
+        self.suppress_mask = True
         self.full_logits = False
         self.eps = 1e-3
         self.threads = 1
@@ -103,14 +108,42 @@ struct GenConfig(Copyable, Movable):
         self.eb_confidence = 0.005
 
 
+def int_flag_rule(flag: String, n: Int) -> String:
+    """The range rule an integer generation flag breaks, or "" when `n` is fine.
+
+    The one place the ranges live: the command line words its usage error from
+    it (`flag --steps must be at least 1, got 0`) and the sampler words its own
+    refusal from it (`--eb-steps must be at least 1, got 0`).
+    """
+    if flag == "eb-stability":
+        return "must be at least 0" if n < 0 else ""
+    if flag == "seed":
+        return ""
+    return "must be at least 1" if n < 1 else ""
+
+
+def float_flag_rule(flag: String, x: Float64) -> String:
+    """The range rule a float generation flag breaks, or "" when `x` is fine.
+
+    A NaN or an infinity breaks every rule: `x > 0` is false for NaN, so an
+    unchecked NaN temperature reads as greedy and a NaN threshold never fires.
+    """
+    if not isfinite(x):
+        return "must be a finite number"
+    if flag == "eb-t-max" or flag == "prev-temp-inv":
+        return "must be above 0" if x <= 0 else ""
+    if flag == "threshold":
+        return "must be between 0 and 1" if x < 0 or x > 1 else ""
+    # temperature, eb-t-min, eb-bound, eb-confidence
+    return "must be at least 0" if x < 0 else ""
+
+
 struct GenResult(Movable):
     var tokens: List[Int]
     var step_ms: List[Float64]
     var forward_passes: Int
     var seconds: Float64
     var stopped_early: Bool
-    var steps_taken: Int
-    """Denoising steps run: one forward pass each."""
     var stop_reason: String
     """Why the loop ended: "complete" (the schedule ran out), "answer_fixed"
     (LLaDA and Dream early stop), "converged" (DiffusionGemma's argmax held
@@ -123,8 +156,11 @@ struct GenResult(Movable):
         self.forward_passes = 0
         self.seconds = 0.0
         self.stopped_early = False
-        self.steps_taken = 0
         self.stop_reason = "complete"
+
+    def steps_taken(self) -> Int:
+        """Denoising steps run: one forward pass each."""
+        return self.forward_passes
 
 
 struct Rng(Movable):
@@ -171,8 +207,11 @@ struct Rng(Movable):
             1.0 / 9007199254740992.0
         )
 
-    def below(mut self, n: Int) -> Int:
-        """Uniform in [0, n): the 53 high bits scaled, unbiased to 2^-53."""
+    def below(mut self, n: Int) raises -> Int:
+        """Uniform in [0, n): the 53 high bits scaled, unbiased to 2^-53. `n`
+        must be positive."""
+        if n <= 0:
+            raise Error("Rng.below needs a positive bound, got " + String(n))
         var x = Float64(self.next_u64() >> 11) * (1.0 / 9007199254740992.0)
         return min(Int(x * Float64(n)), n - 1)
 
@@ -208,7 +247,8 @@ def select_top(conf: List[Float64], k: Int) -> List[Int]:
     var idx = List[Int](capacity=len(conf))
     for i in range(len(conf)):
         idx.append(i)
-    # Insertion sort: candidates per step are at most one block (tens of items).
+    # Insertion sort: O(n^2) in the candidates of a step, which are one block
+    # for LLaDA and the whole generation region for Dream.
     for a in range(1, len(idx)):
         var v = idx[a]
         var b = a - 1
@@ -223,11 +263,39 @@ def select_top(conf: List[Float64], k: Int) -> List[Int]:
     return out^
 
 
-def argmax_and_prob(row: F32Ptr, vocab: Int) -> Tuple[Int, Float64]:
-    """First argmax and its softmax probability, accumulated in f64."""
-    var best = 0
-    var mx = row.unsafe_load(0)
+def _z_ok(z: Float64) -> Bool:
+    """True when z, the sum of exp(logit - row maximum), is what a finite row
+    gives: at least 1 (the maximum contributes exactly 1) and below infinity.
+    A NaN fails the first test. A row with a NaN or a +inf logit, or with every
+    logit -inf, gives z = inf here, because `exp` of NaN is inf in this
+    runtime, and that fails the second."""
+    return z >= 1.0 and isfinite(z)
+
+
+def _refuse_non_finite(position: Int, step: Int) -> Error:
+    """The error for a logits row whose probabilities are not numbers.
+
+    A NaN or an infinity in a row makes `x > mx` false, so the argmax falls
+    back to token 0 and the confidence is NaN, which `select_top` then orders
+    by index: the loop would commit token 0 and report "complete".
+    """
+    return Error(
+        "non-finite logits at canvas position "
+        + String(position)
+        + ", step "
+        + String(step)
+    )
+
+
+def argmax_and_prob(
+    row: F32Ptr, vocab: Int, mask_id: Int = -1
+) -> Tuple[Int, Float64]:
+    """First argmax and its softmax probability, excluding mask_id, in f64."""
+    var best = 1 if mask_id == 0 else 0
+    var mx = row.unsafe_load(best)
     for v in range(1, vocab):
+        if v == mask_id:
+            continue
         var x = row.unsafe_load(v)
         if x > mx:
             mx = x
@@ -235,22 +303,31 @@ def argmax_and_prob(row: F32Ptr, vocab: Int) -> Tuple[Int, Float64]:
     var z = Float64(0)
     var m64 = Float64(mx)
     for v in range(vocab):
+        if v == mask_id:
+            continue
         z += exp(Float64(row.unsafe_load(v)) - m64)
-    return (best, 1.0 / z)
+    return (best, 1.0 / z if _z_ok(z) else nan[DType.float64]())
 
 
 def _gumbel_argmax(
-    row: F32Ptr, vocab: Int, temperature: Float64, mut rng: Rng
+    row: F32Ptr,
+    vocab: Int,
+    temperature: Float64,
+    mut rng: Rng,
+    mask_id: Int = -1,
 ) -> Int:
     """argmax of exp(logits) / (-log U)^temperature, the reference's noise, in f64.
 
     Compared in log space, which ranks identically and does not overflow:
-    logit - temperature * log(-log U).
+    logit - temperature * log(-log U). mask_id consumes a draw but cannot win.
     """
-    var best = 0
+    var best = 1 if mask_id == 0 else 0
     var best_v = Float64(-1e300)
     for v in range(vocab):
         var u = rng.uniform()
+        # Keep one draw per vocabulary entry, even for the excluded mask.
+        if v == mask_id:
+            continue
         var score = Float64(row.unsafe_load(v)) - temperature * log(-log(u))
         if score > best_v:
             best_v = score
@@ -264,6 +341,7 @@ def _greedy_rows(
     vocab: Int,
     algorithm: String,
     threads: Int,
+    mask_id: Int = -1,
 ) raises -> Tuple[List[Int], List[Float64]]:
     """Greedy token and confidence for each requested logits row, rows in parallel.
 
@@ -280,11 +358,11 @@ def _greedy_rows(
     def work(j: Int) {imm}:
         var row = logits.unsafe_offset(row_of[j] * vocab)
         if algorithm == "llada":
-            var r = argmax_and_prob(row, vocab)
+            var r = argmax_and_prob(row, vocab, mask_id)
             tp[unsafe_offset=j] = Int64(r[0])
             cp[unsafe_offset=j] = r[1]
         else:
-            var r = _confidence(row, vocab, algorithm)
+            var r = _confidence(row, vocab, algorithm, mask_id)
             tp[unsafe_offset=j] = Int64(r[0])
             cp[unsafe_offset=j] = r[1]
 
@@ -334,6 +412,9 @@ def generate_observed[
     mut model: M, prompt: List[Int], cfg: GenConfig, mut obs: O
 ) raises -> GenResult:
     """Like `generate`, calling `obs.on_step` after every denoising step."""
+    var rule = float_flag_rule("temperature", cfg.temperature)
+    if rule.byte_length() > 0:
+        raise _eb_flag_error("temperature", rule, String(cfg.temperature))
     if model.config().arch == "dream":
         return _generate_dream(model, prompt, cfg, obs)
     if model.config().arch == "diffusion-gemma":
@@ -383,19 +464,22 @@ def _generate_llada[
     var P = len(prompt)
     var L = P + cfg.gen_length
     var vocab = model.config().vocab
+    var mask_id = model.config().mask_id
+    var excluded_mask_id = mask_id if cfg.suppress_mask else -1
     var res = GenResult()
     for t in prompt:
         res.tokens.append(t)
     for _ in range(cfg.gen_length):
-        res.tokens.append(cfg.mask_id)
+        res.tokens.append(mask_id)
     var rng = Rng(cfg.seed)
-    # Greedy decoding scores each row from four numbers the device reduces, so
-    # the logits never leave it. Gumbel noise needs the rows on the host, and
-    # `full_logits` exists to measure that copy.
+    # Device reductions include every vocabulary entry. Suppression needs the
+    # full row on the host, as does Gumbel noise. With both off, only the token
+    # and four statistics per row leave the device (`full_logits` disables it).
     var use_stats = (
         cfg.temperature <= 0
         and not cfg.full_logits
         and not cfg.dual_cache
+        and not cfg.suppress_mask
         and model.device_row_stats()
     )
     var logits = Floats(
@@ -409,14 +493,14 @@ def _generate_llada[
         var b1 = b0 + cfg.block_length
         var m = 0
         for i in range(b0, b1):
-            if res.tokens[i] == cfg.mask_id:
+            if res.tokens[i] == mask_id:
                 m += 1
         var schedule = num_transfer_tokens(m, steps_per_block)
         for s in range(steps_per_block):
             var t_step = perf_counter_ns()
             var cand = List[Int]()
             for i in range(b0, b1):
-                if res.tokens[i] == cfg.mask_id:
+                if res.tokens[i] == mask_id:
                     cand.append(i)
             if len(cand) == 0:
                 break
@@ -448,23 +532,44 @@ def _generate_llada[
                 # path stays sequential.
                 for j in range(len(cand)):
                     var row = logits.ptr().unsafe_offset(row_of[j] * vocab)
-                    var tok = _gumbel_argmax(row, vocab, cfg.temperature, rng)
+                    var tok = _gumbel_argmax(
+                        row, vocab, cfg.temperature, rng, excluded_mask_id
+                    )
                     x0.append(tok)
+                    var p = _prob_of(row, vocab, tok, excluded_mask_id)
+                    if not isfinite(p):
+                        raise _refuse_non_finite(
+                            cand[j] - P, res.forward_passes
+                        )
                     if cfg.remasking == "random":
                         conf.append(rng.uniform())
                     else:
-                        conf.append(_prob_of(row, vocab, tok))
+                        conf.append(p)
             elif use_stats:
                 x0 = stats.tok.copy()
                 for j in range(len(cand)):
+                    if not _z_ok(stats.z[j]):
+                        raise _refuse_non_finite(
+                            cand[j] - P, res.forward_passes
+                        )
                     if cfg.remasking == "random":
                         conf.append(rng.uniform())
                     else:
                         conf.append(_confidence_from_stats(stats, j, "llada"))
             else:
                 var greedy = _greedy_rows(
-                    logits.ptr(), row_of, vocab, "llada", cfg.threads
+                    logits.ptr(),
+                    row_of,
+                    vocab,
+                    "llada",
+                    cfg.threads,
+                    excluded_mask_id,
                 )
+                for j in range(len(cand)):
+                    if not isfinite(greedy[1][j]):
+                        raise _refuse_non_finite(
+                            cand[j] - P, res.forward_passes
+                        )
                 x0 = greedy[0].copy()
                 if cfg.remasking == "random":
                     for _ in range(len(cand)):
@@ -485,41 +590,54 @@ def _generate_llada[
             res.step_ms.append(Float64(perf_counter_ns() - t_step) / 1e6)
             obs.on_step(res.tokens, committed, res.forward_passes, cfg.steps)
             if cfg.early_stop and answer_is_fixed(
-                res.tokens, P, cfg.mask_id, cfg.stop_ids
+                res.tokens, P, mask_id, cfg.stop_ids
             ):
                 res.stopped_early = True
                 break
         if res.stopped_early:
             break
     res.seconds = Float64(perf_counter_ns() - t_start) / 1e9
-    res.steps_taken = res.forward_passes
     if res.stopped_early:
         res.stop_reason = "answer_fixed"
     return res^
 
 
-def _prob_of(row: F32Ptr, vocab: Int, tok: Int) -> Float64:
-    var mx = row.unsafe_load(0)
+def _prob_of(row: F32Ptr, vocab: Int, tok: Int, mask_id: Int = -1) -> Float64:
+    """Softmax probability of tok, with mask_id excluded from the distribution.
+    """
+    if tok == mask_id:
+        return 0.0
+    var first = 1 if mask_id == 0 else 0
+    var mx = row.unsafe_load(first)
     for v in range(1, vocab):
+        if v == mask_id:
+            continue
         mx = max(mx, row.unsafe_load(v))
     var z = Float64(0)
     for v in range(vocab):
+        if v == mask_id:
+            continue
         z += exp(Float64(row.unsafe_load(v)) - Float64(mx))
+    if not _z_ok(z):
+        return nan[DType.float64]()
     return exp(Float64(row.unsafe_load(tok)) - Float64(mx)) / z
 
 
 def _confidence(
-    row: F32Ptr, vocab: Int, algorithm: String
+    row: F32Ptr, vocab: Int, algorithm: String, mask_id: Int = -1
 ) -> Tuple[Int, Float64]:
     """Greedy token and Dream's confidence for it, in f64.
 
     entropy:      sum_v p_v log p_v (negative entropy; larger is surer)
     maskgit_plus: p(x0)
     topk_margin:  p(top1) - p(top2)
+    mask_id is excluded from the argmax and every probability sum.
     """
-    var best = 0
-    var mx = row.unsafe_load(0)
+    var best = 1 if mask_id == 0 else 0
+    var mx = row.unsafe_load(best)
     for v in range(1, vocab):
+        if v == mask_id:
+            continue
         var x = row.unsafe_load(v)
         if x > mx:
             mx = x
@@ -528,10 +646,14 @@ def _confidence(
     var z = Float64(0)
     var second = Float64(-1e300)
     for v in range(vocab):
+        if v == mask_id:
+            continue
         var x = Float64(row.unsafe_load(v))
         z += exp(x - m64)
         if v != best and x > second:
             second = x
+    if not _z_ok(z):
+        return (best, nan[DType.float64]())
     var p_best = 1.0 / z
     if algorithm == "maskgit_plus":
         return (best, p_best)
@@ -540,6 +662,8 @@ def _confidence(
     var logz = log(z)
     var neg_h = Float64(0)
     for v in range(vocab):
+        if v == mask_id:
+            continue
         var lp = Float64(row.unsafe_load(v)) - m64 - logz
         neg_h += exp(lp) * lp
     return (best, neg_h)
@@ -568,8 +692,10 @@ def _generate_dream[
 
     The whole generation region is one canvas. At step i of S, with
     t = 1 - i(1-eps)/S and s = 1 - (i+1)(1-eps)/S, Dream commits
-    int(n_masked * (1 - s/t)) of the masked positions with the highest
-    confidence, and every remaining one at the last step. Logits are shifted:
+    int(n_masked * (1 - s/t)) positions by confidence, or uniform random
+    confidence for llama.cpp's random rule. Dream's origin rule instead makes
+    independent transfers with probability 1 - s/t, without flooring a count.
+    Every remaining position commits at the last step. Logits are shifted:
     the row before a position scores it.
     """
     if cfg.gen_length <= 0 or cfg.steps <= 0:
@@ -581,11 +707,13 @@ def _generate_dream[
         algorithm != "entropy"
         and algorithm != "maskgit_plus"
         and algorithm != "topk_margin"
+        and algorithm != "origin"
+        and algorithm != "random"
     ):
         raise Error(
             "unknown Dream algorithm: "
             + cfg.remasking
-            + " (entropy, maskgit_plus, topk_margin)"
+            + " (entropy, maskgit_plus, topk_margin, origin, random)"
         )
     if cfg.temperature > 0:
         raise Error(
@@ -602,12 +730,20 @@ def _generate_dream[
             "Dream needs at least one prompt token (logits are shifted)"
         )
     var vocab = model.config().vocab
+    var mask_id = model.config().mask_id
+    var excluded_mask_id = mask_id if cfg.suppress_mask else -1
     var res = GenResult()
     for t in prompt:
         res.tokens.append(t)
     for _ in range(cfg.gen_length):
-        res.tokens.append(cfg.mask_id)
-    var use_stats = model.device_row_stats()
+        res.tokens.append(mask_id)
+    var rng = Rng(cfg.seed)
+    # origin and random choose positions themselves, not by entropy.
+    var scoring = (
+        "maskgit_plus" if algorithm == "origin"
+        or algorithm == "random" else algorithm
+    )
+    var use_stats = not cfg.suppress_mask and model.device_row_stats()
     var logits = Floats(1 if use_stats else cfg.gen_length * vocab)
     var stats = RowStats()
     var t_start = perf_counter_ns()
@@ -615,7 +751,7 @@ def _generate_dream[
         var t_step = perf_counter_ns()
         var cand = List[Int]()
         for p in range(P, P + cfg.gen_length):
-            if res.tokens[p] == cfg.mask_id:
+            if res.tokens[p] == mask_id:
                 cand.append(p)
         if len(cand) == 0:
             break
@@ -629,7 +765,10 @@ def _generate_dream[
             res.forward_passes += 1
             x0 = stats.tok.copy()
             for j in range(len(cand)):
-                conf.append(_confidence_from_stats(stats, j, algorithm))
+                var c = _confidence_from_stats(stats, j, scoring)
+                if not _z_ok(stats.z[j]) or not isfinite(c):
+                    raise _refuse_non_finite(cand[j] - P, res.forward_passes)
+                conf.append(c)
         else:
             model.forward(res.tokens, rows, logits.ptr())
             res.forward_passes += 1
@@ -637,29 +776,46 @@ def _generate_dream[
             for j in range(len(cand)):
                 row_of.append(j)
             var greedy = _greedy_rows(
-                logits.ptr(), row_of, vocab, algorithm, cfg.threads
+                logits.ptr(),
+                row_of,
+                vocab,
+                scoring,
+                cfg.threads,
+                excluded_mask_id,
             )
+            for j in range(len(cand)):
+                if not isfinite(greedy[1][j]):
+                    raise _refuse_non_finite(cand[j] - P, res.forward_passes)
             x0 = greedy[0].copy()
             conf = greedy[1].copy()
-        var n_transfer = len(cand)
+        var p_transfer = Float64(1.0)
         if i < cfg.steps - 1:
             var t = 1.0 - Float64(i) * (1.0 - cfg.eps) / Float64(cfg.steps)
             var s = 1.0 - Float64(i + 1) * (1.0 - cfg.eps) / Float64(cfg.steps)
-            n_transfer = Int(Float64(len(cand)) * (1.0 - s / t))
+            p_transfer = 1.0 - s / t
         var committed = List[Int]()
-        if n_transfer > 0:
-            for j in select_top(conf, n_transfer):
-                res.tokens[cand[j]] = x0[j]
-                committed.append(cand[j])
+        if algorithm == "origin":
+            for j in range(len(cand)):
+                if rng.uniform() < p_transfer:
+                    res.tokens[cand[j]] = x0[j]
+                    committed.append(cand[j])
+        else:
+            if algorithm == "random":
+                for j in range(len(cand)):
+                    conf[j] = rng.uniform()
+            var n_transfer = Int(Float64(len(cand)) * p_transfer)
+            if n_transfer > 0:
+                for j in select_top(conf, n_transfer):
+                    res.tokens[cand[j]] = x0[j]
+                    committed.append(cand[j])
         res.step_ms.append(Float64(perf_counter_ns() - t_step) / 1e6)
         obs.on_step(res.tokens, committed, res.forward_passes, cfg.steps)
         if cfg.early_stop and answer_is_fixed(
-            res.tokens, P, cfg.mask_id, cfg.stop_ids
+            res.tokens, P, mask_id, cfg.stop_ids
         ):
             res.stopped_early = True
             break
     res.seconds = Float64(perf_counter_ns() - t_start) / 1e9
-    res.steps_taken = res.forward_passes
     if res.stopped_early:
         res.stop_reason = "answer_fixed"
     return res^
@@ -778,7 +934,7 @@ def eb_temperature(
     return t_min + (t_max - t_min) * (Float64(cur) / Float64(steps))
 
 
-def eb_initial_canvas(mut rng: Rng, n: Int, vocab: Int) -> List[Int]:
+def eb_initial_canvas(mut rng: Rng, n: Int, vocab: Int) raises -> List[Int]:
     """`n` ids drawn uniformly from the whole vocabulary, special tokens
     included."""
     var out = List[Int](capacity=n)
@@ -868,6 +1024,28 @@ def _eb_flag_error(flag: String, rule: String, got: String) -> Error:
     return Error("--" + flag + " " + rule + ", got " + got)
 
 
+def _check_eb_flags(cfg: GenConfig) raises:
+    """Refuse an entropy-bound setting outside its range, by the shared rules.
+    """
+    var rule = int_flag_rule("eb-steps", cfg.eb_steps)
+    if rule.byte_length() > 0:
+        raise _eb_flag_error("eb-steps", rule, String(cfg.eb_steps))
+    rule = int_flag_rule("eb-stability", cfg.eb_stability)
+    if rule.byte_length() > 0:
+        raise _eb_flag_error("eb-stability", rule, String(cfg.eb_stability))
+    for flag in ["eb-t-min", "eb-t-max", "eb-bound", "eb-confidence"]:
+        var x = cfg.eb_t_min
+        if flag == "eb-t-max":
+            x = cfg.eb_t_max
+        elif flag == "eb-bound":
+            x = cfg.eb_bound
+        elif flag == "eb-confidence":
+            x = cfg.eb_confidence
+        rule = float_flag_rule(flag, x)
+        if rule.byte_length() > 0:
+            raise _eb_flag_error(flag, rule, String(x))
+
+
 def _generate_diffusion_gemma[
     M: DenoisingModel, O: StepObserver
 ](
@@ -897,32 +1075,20 @@ def _generate_diffusion_gemma[
     """
     if cfg.gen_length <= 0:
         raise Error("generation length must be positive")
-    if cfg.eb_steps < 1:
-        raise _eb_flag_error(
-            "eb-steps", "must be at least 1", String(cfg.eb_steps)
+    if cfg.gen_length != model.config().canvas:
+        # The model scores [prompt | canvas] with the canvas it declares and
+        # writes that many logits rows: a different length overflows the
+        # buffer or moves the prompt boundary.
+        raise Error(
+            "generation length "
+            + String(cfg.gen_length)
+            + " must equal the model's canvas length "
+            + String(model.config().canvas)
+            + " (diffusion.canvas_length)"
         )
     # The reference accepts t_min = 0: every step still runs at a positive
     # temperature, the last at t_min + (t_max - t_min) / steps.
-    if not isfinite(cfg.eb_t_min) or cfg.eb_t_min < 0:
-        raise _eb_flag_error(
-            "eb-t-min", "must be at least 0", String(cfg.eb_t_min)
-        )
-    if not isfinite(cfg.eb_t_max) or cfg.eb_t_max <= 0:
-        raise _eb_flag_error(
-            "eb-t-max", "must be a number above 0", String(cfg.eb_t_max)
-        )
-    if not isfinite(cfg.eb_bound) or cfg.eb_bound < 0:
-        raise _eb_flag_error(
-            "eb-bound", "must be at least 0", String(cfg.eb_bound)
-        )
-    if cfg.eb_stability < 0:
-        raise _eb_flag_error(
-            "eb-stability", "must be at least 0", String(cfg.eb_stability)
-        )
-    if not isfinite(cfg.eb_confidence) or cfg.eb_confidence < 0:
-        raise _eb_flag_error(
-            "eb-confidence", "must be at least 0", String(cfg.eb_confidence)
-        )
+    _check_eb_flags(cfg)
     var P = len(prompt)
     if P == 0:
         raise Error("DiffusionGemma needs at least one prompt token")
@@ -1001,7 +1167,6 @@ def _generate_diffusion_gemma[
             finished = True
             break
     res.seconds = Float64(perf_counter_ns() - t_start) / 1e9
-    res.steps_taken = res.forward_passes
     res.stop_reason = "converged" if finished else "max_steps"
-    res.stopped_early = finished and res.steps_taken < S
+    res.stopped_early = finished and res.steps_taken() < S
     return res^

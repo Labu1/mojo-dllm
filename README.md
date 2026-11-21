@@ -7,7 +7,7 @@
 <p align="center"><em>Local inference for diffusion language models, written in Mojo.</em></p>
 
 <p align="center">
-  <a href="https://github.com/vladimirrott/mojo-dllm/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/vladimirrott/mojo-dllm/ci.yml?branch=main&style=flat-square&label=CI" alt="CI"></a>
+  <a href="https://github.com/dllm-labs/mojo-dllm/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/dllm-labs/mojo-dllm/ci.yml?branch=main&style=flat-square&label=CI" alt="CI"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue?style=flat-square" alt="License: Apache-2.0"></a>
   <img src="https://img.shields.io/badge/Mojo-1.1.0-ff6b1a?style=flat-square" alt="Mojo 1.1.0">
   <img src="https://img.shields.io/badge/models-LLaDA--8B%20%7C%20LLaDA--1.5%20%7C%20Dream--7B%20%7C%20Dream--Coder%20%7C%20DiffuCoder--cpGRPO-5eead4?style=flat-square" alt="Models: LLaDA-8B, LLaDA-1.5, Dream-7B, Dream-Coder, DiffuCoder-cpGRPO">
@@ -55,7 +55,7 @@ is built around that.
 | diffuse-cpp, cache off | 9,996 | 0.40 | 2.3 s | 8.2 GB | C++ |
 | diffuse-cpp, cache + `entropy_exit` † | 4,380 | 1.12 | 2.6 s | 8.4 GB | C++ |
 
-Versions: mojo-dllm `bdd268b`, Mojo 1.1.0 (8189361e), llama.cpp `836d571`, diffuse-cpp `1d2bd6a`. Evidence: `bench/results/2026-10-03-cpu-diffuse.json`, `bench/results/2026-10-03-cpu-llada.json`.
+Versions: mojo-dllm `bdd268b` (cpu-llada) and `dd0a647` (cpu-diffuse, diffuse-cpp rows only), Mojo 1.1.0 (8189361e), llama.cpp `836d571`, diffuse-cpp `1d2bd6a`. Evidence: `bench/results/2026-10-03-cpu-diffuse.json`, `bench/results/2026-10-03-cpu-llada.json`.
 
 † Not the same work: the inter-step cache reuses stale K/V and `entropy_exit` can stop early. Shown because it is diffuse-cpp's recommended mode.
 
@@ -132,7 +132,7 @@ the ablation row measures.
 
 ```bash
 curl -LsSf https://astral.sh/uv/install.sh | sh    # skip if you have uv
-git clone https://github.com/vladimirrott/mojo-dllm && cd mojo-dllm
+git clone https://github.com/dllm-labs/mojo-dllm && cd mojo-dllm
 ./mojo-dllm setup
 ./mojo-dllm run "Explain speculative decoding in two sentences."
 ```
@@ -188,8 +188,8 @@ mojo-dllm checks itself against code it does not share:
 
 - decoders and GEMMs against the `gguf` package's dequantization;
 - a 2-layer model's forward pass against numpy;
-- both tokenizers against `llama-tokenize` on 36 multilingual cases each, id
-  for id;
+- the LLaDA and Dream tokenizers against `llama-tokenize` on 36 multilingual
+  cases each, and DiffusionGemma's on 54, id for id;
 - logits and generated tokens on both real models against llama.cpp;
 - every GPU kernel against the CPU function it replaces, and GPU logits
   against llama.cpp.
@@ -202,7 +202,7 @@ that reproduce it.
 Version 0.1 runs on the CPU. Since then, `main` also runs on NVIDIA GPUs
 (`--device gpu`, compute capability 8.0 and newer). Both run LLaDA-8B and Dream-7B from GGUF
 files whose projection matrices are Q4_K or Q6_K. The embedding table and the
-norm and bias vectors may be F32, F16, BF16, Q8_0 or Q5_K as well.
+norm and bias vectors may be F32, F16, BF16, Q5_0, Q8_0, Q4_K, Q5_K or Q6_K.
 
 | Milestone | State |
 |---|---|

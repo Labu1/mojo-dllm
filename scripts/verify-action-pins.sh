@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Adapted from vladimirrott/maintainer-agent/scripts/verify-action-pins.sh.
+# Adapted from agentsmith-tools/maintainer-agent/scripts/verify-action-pins.sh.
 # Upstream revision: 9d1dbd61d0ec3ef102fe2ed9dcd215d874388b1e
 #
 # MIT License
