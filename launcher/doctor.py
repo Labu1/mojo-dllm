@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from typing import TextIO
 
 from launcher import build
-from launcher.errors import LauncherError
+from launcher.errors import LauncherError, UsageError
 from launcher.gpu import MIN_COMPUTE_CAP, parse_nvidia_smi
 from launcher.probes import Probes
 from launcher.ui import Style
@@ -168,3 +168,13 @@ def run_doctor(p: Probes, out: TextIO, style: Style) -> int:
     for r in results:
         render(r, style, out)
     return 1 if any(r.status == "fail" for r in results) else 0
+
+
+def parse_doctor_args(argv: list[str]) -> None:
+    """Refuse any argument to doctor, which takes none: a typo such as
+    --jsno used to get the normal report and exit 0. The first offending
+    argument is reported. -h and --help are answered by main before this runs."""
+    for arg in argv:
+        if arg.startswith("-"):
+            raise UsageError(f"unknown option {arg} for doctor. Usage: ./mojo-dllm doctor")
+        raise UsageError(f"unexpected argument {arg!r} for doctor. Usage: ./mojo-dllm doctor")
