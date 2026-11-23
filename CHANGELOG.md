@@ -20,6 +20,11 @@ semantic versioning (0.y: minor bumps may break things).
   Python reference: each masked position commits independently with probability `1 - s/t`, forced to 1 at the final
   step. `random` follows llama.cpp: a uniform random confidence per candidate, then the scheduled top-k. Both use
   `--seed`; the default stays `entropy`. `--no-suppress-mask` allows the mask token as a sampled answer again.
+- Optional DiffusionGemma graph traces (`--trace-dir`, `--trace-only`) and
+  ordinary-buffer replay (`--no-repack`). `scripts/build_dg_ref.sh` also builds
+  `dg_matmul`. The projection, matrix, softmax and tiny-model checkers, together
+  with `compare_dg_traces.py`, record the cached/unified arithmetic differences
+  and independent forward comparisons for #163.
 
 ### Changed
 
@@ -128,11 +133,6 @@ semantic versioning (0.y: minor bumps may break things).
 - A Q5_0 reference decoder (22-byte blocks of 32 weights) with GGUF type sizing,
   a reference test against gguf-py's decoder and a hand-built block test of the
   high-bit layout. It is the first piece of the DiffusionGemma reader (#61).
-- Optional DiffusionGemma graph traces (`--trace-dir`, `--trace-only`) and
-  ordinary-buffer replay (`--no-repack`). `scripts/build_dg_ref.sh` also builds
-  `dg_matmul`. The projection, matrix, softmax and tiny-model checkers, together
-  with `compare_dg_traces.py`, record the cached/unified arithmetic differences
-  and independent forward comparisons for #163.
 - A `diffusion-gemma` branch of `ModelConfig` reads the DiffusionGemma
   metadata (per-layer sliding/global pattern and K/V head counts, head sizes and
   RoPE bases per kind, experts, canvas length, soft cap) and checks the tensor

@@ -483,6 +483,11 @@
     "method": "direct byte comparison with GitHub file API content",
     "compilation_inputs_checked": 403,
     "matching": 403,
+    "arithmetic_source_blobs": {
+      "ggml/src/ggml-cpu/arch/x86/repack.cpp": "af1cebad131d17118c26634faccb9a6e0c08a6f9",
+      "ggml/src/ggml-cpu/repack.cpp": "9282ca299b60a93ab60840fad2823bc6a47396ea",
+      "ggml/src/ggml-cpu/vec.cpp": "8f0bf4999cfb30bfb826f3253e1ccd8062729516"
+    },
     "differences": []
   }
 }

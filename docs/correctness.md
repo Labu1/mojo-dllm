@@ -344,11 +344,12 @@ against the unified pass, and the unified pass again with the previous-step
 logits changed by one part in a million. On the two LLaDA prompts with a random
 canvas those distances exceed the LLaDA bound (the one-in-a-million change moved
 the output by a median relative RMS of 0.18 to 0.26). No LLaDA spread was
-measured for comparison. The reference path decision below traces the cached/
-unified differences to matrix dispatch and softmax arithmetic. The separate
-previous-logit perturbation remains untraced; changes in expert routing (8 of
-128 experts per token) propagated by bidirectional attention are a hypothesis
-for that experiment. A failed comparison prints these distances beside the verdict. No
+measured for comparison. The traces below locate the first cached/unified
+differences in layer 0, at the `1e-7` scale, in matrix dispatch and softmax
+arithmetic. How those differences grow to the logit distances above remains
+untraced. Changes in expert routing (8 of 128 experts per token) are one
+hypothesis for that growth and for the separate previous-logit perturbation.
+A failed comparison prints these distances beside the verdict. No
 DiffusionGemma result is recorded yet, so the tables above hold none.
 
 The tokenizer goldens in `tests/fixtures/gemma4-tokenizer-golden.tsv` fix the
@@ -449,7 +450,7 @@ with repacking disabled, and at `P=8` with repacking enabled, identify their
 first prompt difference at the first layer's `kq_soft_max` node. Q/K/V
 projections, head normalization, RoPE and raw attention scores are
 bit-identical before it. The prompt softmax differs by `1.1920929e-7`.
-For canvas rows, the first differing node is `ffn_moe_gate_up-0` at `P=9`
+For canvas rows, the first differing traced node is `ffn_moe_gate_up-0` at `P=9`
 without repacking, and `l_out-1` at `P=8` with repacking.
 The original repacked
 `P=9` trace grows to a first-layer canvas-output error of `0.00931`.
@@ -504,7 +505,9 @@ comparisons retain their explicit CPU mode and measured error metrics.
 
 The native CPU-tool tests require `DG_REF` and `DG_MATMUL` to point at
 built executables. CI leaves those variables unset and skips those tests.
-The recorded local run enabled them explicitly.
+The `native_controls` in `bench/checks/2026-11-05-dg-reference-path-mutations.json`
+record eight passing native tests before and after the mutation run. That
+record predates the nonpositive block-size guard in `dg_matmul`.
 The Python trace and diagnostic tests run in `scripts/run_extra_group_tests.sh`
 with the fixtures group's NumPy. That step rejects any skip. The test-only
 group and native-tool skips are listed with their reasons in
