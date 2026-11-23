@@ -169,6 +169,14 @@ llama.cpp's regex for each pre-tokenizer is in `src/llama-vocab.cpp`. A model
 whose `tokenizer.ggml.model` is not `gpt2` needs its own module, as `gemma4`
 has in `tokenizer/gemma4.mojo`; `Tokenizer` picks it from that key.
 
+The gemma4 tokenizer stops generation where llama.cpp does: on the tokens
+with the texts `<eos>`, `<turn|>` and `<|tool_response>`, and on the ids under
+`tokenizer.ggml.eos_token_id`, `eot_token_id` and `eom_token_id` when the file
+sets them, each id once. A file whose `eos_token_id` is missing or names
+another token is accepted, and still stops at `<eos>`. Special tokens are cut
+from the text longest first, equal lengths in id order, with a merge sort, so
+a file that marks every token as control still loads quickly.
+
 ## 5. Sampler
 
 Add the model's reference sampler next to LLaDA's in
