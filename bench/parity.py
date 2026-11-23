@@ -10,8 +10,8 @@ usage: python3 bench/parity.py --model MODEL.gguf [--arch llada|dream|diffusion-
 records mojo-dllm against it and the two references against each other, which
 shows how far two builds of llama.cpp disagree on the same model.
 
-Writes bench/parity/<date>-<arch>-<model-stem>[-gpu].json (the LLaDA evidence the DiffusionGemma bound is taken from,
-2026-10-03-llada.json, predates the model stem in the name and keeps its name). scripts/bench_table.py renders it into
+Writes bench/parity/<date>-<arch>-<model-stem>[-gpu].json (2026-10-03-llada.json predates the model stem
+in the name and keeps its name). scripts/bench_table.py renders it into
 docs/correctness.md. Requires build/mojo-dllm and build/llada_ref
 (see docs/correctness.md for how to build the latter).
 
@@ -471,6 +471,20 @@ def dg_case_files(workdir: pathlib.Path, prompts: tuple[str, ...] | None = None)
     return [found[n] for n in want]
 
 
+def dg_check_reference_spread(case_json: pathlib.Path, meta: dict, bound: dict) -> None:
+    """Check the two same-input controls. The noisy-previous-logit run changes the input."""
+    spread = meta.get("ref_spread")
+    for label, variant in (("cached vs unified", "unified"), ("cached-sc vs unified-sc", "unified-sc")):
+        limits = dg_case_bound(meta, variant, bound)
+        control = spread.get(label) if isinstance(spread, dict) else None
+        if not isinstance(control, dict) or control.get("rows") != meta["canvas_length"]:
+            raise SystemExit(f"refusing: {case_json} lacks a complete ref_spread for {label}; run --phase ref again")
+        problems = dg_violations(control, limits)
+        if problems:
+            raise SystemExit(f"this reference does not reproduce the calibration: {case_json.parent.name} {label}: "
+                             + "; ".join(problems))
+
+
 def dg_compare(
     workdir: pathlib.Path,
     bound: Bound,
@@ -491,6 +505,8 @@ def dg_compare(
         d = case_json.parent
         meta = json.loads(case_json.read_text(encoding="utf-8"))
         seen_prompts.add(meta["prompt"])
+        if fixed_input:
+            dg_check_reference_spread(case_json, meta, bound)
         for v in DG_VARIANTS:
             receipt = None
             ref, mojo = d / f"{v}.ref.f32", d / f"{v}.mojo.f32"
@@ -602,6 +618,7 @@ def dg_reference(args: argparse.Namespace, workdir: pathlib.Path, llama_src: pat
     provenance = json.loads(pathlib.Path(args.model_provenance).read_text(encoding="utf-8")) if args.model_provenance else None
     sha = None if provenance else _sha256(pathlib.Path(args.model))
     model_stat = pathlib.Path(args.model).stat()
+    cpu = reference_cpu()
     for i, prompt_text in enumerate(DG_PROMPTS):
         d = workdir / f"case{i}"
         d.mkdir(parents=True, exist_ok=True)
@@ -614,6 +631,7 @@ def dg_reference(args: argparse.Namespace, workdir: pathlib.Path, llama_src: pat
             n_vocab=vocab, canvas_length=canvas_len, final_logit_softcapping=info["final_logit_softcapping"],
             prev_file=DG_PREV_FILE, prev_temp_inv=DG_PREV_TEMP_INV, model=pathlib.Path(args.model).name,
             model_sha256=sha, llama_cpp_commit=head,
+            reference_cpu=cpu, reference_threads=int(args.threads),
             model_bytes=model_stat.st_size, model_mtime_ns=model_stat.st_mtime_ns,
             model_path=str(pathlib.Path(args.model).resolve()),
             model_provenance=provenance,
@@ -671,11 +689,20 @@ def dgemma_main(args: argparse.Namespace) -> int:
     return 0
 
 
+def reference_cpu(path: pathlib.Path = pathlib.Path("/proc/cpuinfo")) -> dict:
+    first_cpu = path.read_text().split("\n\n", 1)[0] if path.is_file() else ""
+    fields = {}
+    for line in first_cpu.splitlines():
+        key, _, value = line.partition(":")
+        fields[key.strip()] = value.strip()
+    flags = fields.get("flags") or fields.get("Features")
+    return dict(cpu_model=fields.get("model name") or platform.processor() or None,
+                cpu_flags=flags.split() if flags else None)
+
+
 def machine_info() -> dict:
     """What the run can read about the machine it ran on (the rest of a hand-written `machine` entry is not known here)."""
-    cpu = next((l.split(":", 1)[1].strip() for l in pathlib.Path("/proc/cpuinfo").read_text().splitlines()
-                if l.startswith("model name")), None) if pathlib.Path("/proc/cpuinfo").is_file() else None
-    return dict(os=platform.platform(), cpu=cpu, logical_cpus=os.cpu_count(),
+    return dict(os=platform.platform(), cpu=reference_cpu()["cpu_model"], logical_cpus=os.cpu_count(),
                 memory_bytes=os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES"))
 
 

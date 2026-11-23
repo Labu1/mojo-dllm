@@ -349,6 +349,11 @@ an AMD EPYC 9J14, with native AVX512 CPU kernels. `reference_configuration`
 records the CPU model, ISA, compiler flags and affinity. `source` records the
 reconstructed pinned build and the 403/403 compilation inputs checked against
 the pinned upstream content.
+The bounds apply to this recorded CPU and reference build. Each new `case.json`
+records the local reference CPU model and flags when available, and the thread
+count. Before comparing candidate logits, the comparator checks the local
+cached/unified spread for each self-conditioning state against that state's
+calibrated bounds. A reference outside those bounds stops the comparison.
 
 `bench/dg_candidate.py` executes the supplied candidate command without a shell
 and writes an execution receipt alongside each `*.mojo.f32`. Its argv template
@@ -357,8 +362,8 @@ original previous-step buffer and its temperature. Receipts bind those inputs
 to output contents and the executed binary/revision. The comparator verifies
 all receipts and expected output lengths before computing metrics. Each measured
 case/state has nonzero reference spread, so the protocol also refuses a candidate
-output that is byte-identical to its reference. This safeguard catches a command
-that simply copies the reference despite producing an otherwise valid receipt.
+output that is byte-identical to the reference for its own variant. The receipt
+provides an audit trail for the candidate command and its inputs.
 The parity record uses the candidate revision recorded at export.
 The comparison requires `case0` through `case3`, in the measured prompt order,
 and one candidate build across all cases and variants. The historical
@@ -400,9 +405,10 @@ comes from the same-input cached/unified controls.
 | soft-cap removed | 16 / 16 |
 <!-- dg-sensitivity:end -->
 
-Held-out runs on case0 used the frozen bounds above. With four threads, all four
-variants pass and agree bit for bit with their eight-thread counterparts. Two
-additional eight-thread unified passes with repacking disabled fall outside the
+Held-out runs on case0 used the frozen bounds above. A thread-count invariance
+check found that all four variants agreed bit for bit between four and eight threads.
+Two additional eight-thread unified passes used `dg_ref` rebuilt from PR #174
+for its `--no-repack` option. With repacking disabled, both fall outside the
 envelope. Their maximum relative RMS is 0.49618 without SC and 0.81689 with SC,
 against bounds of 0.40245 and 0.71433. These are valid reference runs with another
 weight arithmetic path. The observed rejections establish that the protocol's
@@ -415,6 +421,8 @@ The 24 same-input calibration controls comprise the 16 cached/unified comparison
 that define the bound and eight zero-error repeats. Each fault is detected on all
 16 case/variant pairs. A separate replay of the saved logits records the same
 verdicts in `bench/checks/2026-11-05-dg-rule-verification.json`.
+The guard-mutation results in `bench/checks/2026-11-05-dg-guard-mutations.json`
+apply to the code at `44773ed`.
 Fault detection requires a rejection somewhere in the suite;
 all positive controls must pass. The layer-15 mutant changes its output scale
 from 0.5234375 to 1.0. `bench/checks/2026-11-10-dg-mutant.json` records the

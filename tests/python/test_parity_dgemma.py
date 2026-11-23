@@ -422,7 +422,10 @@ def test_dgemma_compare_entrypoint_uses_the_dg_protocol_and_requires_receipts(tm
     case = make_case(tmp_path / "build/dg-parity/model", mojo=parity.DG_VARIANTS, prompts=parity.DG_PROMPTS)
     evidence = json.loads((ROOT / parity.DG_SENSITIVITY_EVIDENCE).read_text(encoding="utf-8"))
     inputs = next(iter(evidence["inputs"].values()))
-    meta = dict(inputs, ref_spread={}, model=evidence["model"], llama_cpp_commit=evidence["llama_cpp_commit"],
+    controls = {r["state"]: r for r in evidence["records"]
+                if r["prompt"] == inputs["prompt"] and r["kind"] == "cache-path"}
+    spread = {"cached vs unified": controls["no-sc"], "cached-sc vs unified-sc": controls["sc"]}
+    meta = dict(inputs, ref_spread=spread, model=evidence["model"], llama_cpp_commit=evidence["llama_cpp_commit"],
                 model_bytes=evidence["model_identity"]["bytes"], model_provenance=evidence["model_provenance"])
     (case / "case.json").write_text(json.dumps(meta))
     bound = parity.dg_sensitivity_bound(ROOT)
@@ -519,6 +522,12 @@ def test_check_dg_bound_refuses_the_same_partial_sets(tmp_path: Path) -> None:
     assert "case1" in str(e.value)
 
 
+def test_reference_cpu_records_model_and_instruction_flags(tmp_path: Path) -> None:
+    cpuinfo = tmp_path / "cpuinfo"
+    cpuinfo.write_text("processor : 0\nmodel name : test CPU\nflags : sse2 avx2\n")
+    assert parity.reference_cpu(cpuinfo) == {"cpu_model": "test CPU", "cpu_flags": ["sse2", "avx2"]}
+
+
 def test_the_reference_phase_deletes_every_old_mojo_dump_and_sidecar(tmp_path: Path, monkeypatch) -> None:
     make_case(tmp_path, mojo=parity.DG_VARIANTS)
     for folder in tmp_path.glob("case*"):
@@ -541,7 +550,12 @@ def test_the_reference_phase_deletes_every_old_mojo_dump_and_sidecar(tmp_path: P
     monkeypatch.setattr(parity, "dg_spread", lambda d, vocab: {})
     monkeypatch.setattr(parity, "dg_spread_lines", lambda spread: [])
     args = type("A", (), {"ref": "dg_ref", "model": str(model), "threads": "1", "model_provenance": None})()
+    cpu = {"cpu_model": "test CPU", "cpu_flags": ["avx2"]}
+    monkeypatch.setattr(parity, "reference_cpu", lambda: cpu)
     parity.dg_reference(args, tmp_path, tmp_path)
+    for case_json in tmp_path.glob("case*/case.json"):
+        recorded = json.loads(case_json.read_text())
+        assert recorded["reference_cpu"] == cpu and recorded["reference_threads"] == 1
     left = sorted(p.name for p in tmp_path.glob("case*/*.mojo.f32*"))
     assert left == [], left
     assert list(tmp_path.glob("case*/*.mojo.receipt.json")) == []

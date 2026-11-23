@@ -31,6 +31,28 @@ def fixture(tmp_path: Path) -> tuple[Path, Path, dict]:
     return case, model, meta
 
 
+def reference_controls() -> dict:
+    metrics = dict(rows=1, argmax_agree=1, min_cosine=1.0, mean_top5_overlap=2.0,
+                   max_rel_rms=0.0, top1_max_rel_err=0.0)
+    return {name: metrics.copy() for name in ("cached vs unified", "cached-sc vs unified-sc")}
+
+
+@pytest.mark.parametrize(("label", "state"), [("cached vs unified", "no-sc"), ("cached-sc vs unified-sc", "sc")])
+def test_local_reference_outside_its_state_bound_stops_before_candidate(tmp_path: Path, label: str, state: str) -> None:
+    case, _, meta = fixture(tmp_path)
+    meta["ref_spread"] = reference_controls()
+    meta["ref_spread"][label]["max_rel_rms"] = 0.5
+    (case / "case.json").write_text(json.dumps(meta))
+    limits = dict(min_cosine=0.9, argmax_fraction=1.0, mean_top5_overlap=2.0,
+                  max_rel_rms=0.5, max_top1_rel_err=0.0)
+    states = {"no-sc": limits, "sc": limits}
+    states[state] = dict(limits, max_rel_rms=0.1)
+    bound = dict(protocol="dg-fixed-input-v1", model=meta["model"], llama_cpp_commit="pin",
+                 cases={"fixed": dict(inputs=meta, states=states)})
+    with pytest.raises(SystemExit, match=f"this reference does not reproduce the calibration.*{label}.*RMS"):
+        parity.dg_compare(tmp_path, bound)
+
+
 def runtime_command(*, sc: bool = False, code: str = "") -> list[str]:
     program = "import pathlib,struct,sys; pathlib.Path(sys.argv[1]).write_bytes(struct.pack('<2f',1.,2.)); " + code
     command = [sys.executable, "-c", program, "{out}", "{model}", "{case_json}", "{variant}"]
@@ -189,7 +211,7 @@ def test_wrong_variant_or_replaced_shared_previous_logits_is_refused(tmp_path: P
 def test_real_comparator_accepts_zero_spread_identical_executed_candidates(tmp_path: Path) -> None:
     np = pytest.importorskip("numpy", reason="numpy is in the `fixtures` group, not the `test` group; CI runs this file there")
     case, model, meta = fixture(tmp_path)
-    meta["ref_spread"] = {}
+    meta["ref_spread"] = reference_controls()
     (case / "case.json").write_text(json.dumps(meta))
     program = tmp_path / "tiny_runtime.py"
     program.write_text("import pathlib,struct,sys\npathlib.Path(sys.argv[1]).write_bytes(struct.pack('<2f',1.,2.))\n")
@@ -237,7 +259,7 @@ def test_real_comparator_accepts_zero_spread_identical_executed_candidates(tmp_p
 @pytest.mark.parametrize("state", ["no-sc", "sc"])
 def test_protocol_refuses_copied_output_with_a_valid_receipt_and_nonzero_spread(tmp_path: Path, state: str) -> None:
     case, model, meta = fixture(tmp_path)
-    meta["ref_spread"] = {}
+    meta["ref_spread"] = reference_controls()
     (case / "case.json").write_text(json.dumps(meta))
     for variant in parity.DG_VARIANTS:
         (case / f"{variant}.ref.f32").write_bytes(struct.pack("<2f", 1.0, 2.0))
@@ -260,7 +282,7 @@ def test_protocol_refuses_copied_output_with_a_valid_receipt_and_nonzero_spread(
 def test_protocol_softcap_rejects_executed_outputs_with_all_distance_metrics_in_bound(tmp_path: Path) -> None:
     pytest.importorskip("numpy", reason="numpy is in the `fixtures` group, not the `test` group; CI runs this file there")
     case, model, meta = fixture(tmp_path)
-    meta["ref_spread"] = {}
+    meta["ref_spread"] = reference_controls()
     (case / "case.json").write_text(json.dumps(meta))
     for variant in parity.DG_VARIANTS:
         (case / f"{variant}.ref.f32").write_bytes(struct.pack("<2f", 29.0, 14.0))

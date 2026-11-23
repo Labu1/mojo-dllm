@@ -23,6 +23,12 @@ semantic versioning (0.y: minor bumps may break things).
 
 ### Changed
 
+- DiffusionGemma's `dg-fixed-input-v1` comparison uses the reference's cached/unified
+  spread for each prompt and self-conditioning state. It checks the local reference
+  against the recorded calibration before evaluating candidate logits, verifies the
+  candidate receipt, and checks the model's absolute soft-cap. The calibration and
+  fault controls are in `bench/checks/2026-11-05-dg-sensitivity.json`.
+  `bench/check_dg_bound.py make-mutant --record` saves the changed tensor, sizes and hashes.
 - The mask token can no longer be sampled (issue #40, pull request #68): argmax, the softmax normalizer and Gumbel
   selection skip it, and the Gumbel draw for the skipped candidate is still consumed, so the random stream does not
   move. `--no-suppress-mask` restores the old behavior for parity experiments. On GPU, suppression turns the device
@@ -106,15 +112,11 @@ semantic versioning (0.y: minor bumps may break things).
   decode step), each with or without self-conditioning from a given
   previous-step buffer. `bench/parity.py --arch diffusion-gemma` runs the
   reference phase, and a comparison phase that stops with a message until
-  mojo-dllm's own outputs exist (#64). The `dg-fixed-input-v1` comparison derives
-  per-prompt, per-SC-state bounds from both directions of the reference's own
-  cached/unified spread and checks the model's absolute soft-cap. Candidate
-  execution receipts and byte-identity checks guard the comparison path.
-  `bench/check_dg_bound.py` records calibration controls and detects a missing
-  final soft-cap and a dropped layer scale
-  (`bench/checks/2026-11-05-dg-sensitivity.json`). Its `make-mutant --record`
-  option saves the tensor change, file sizes and model hashes.
-  The tokenizer goldens for `gemma4`
+  mojo-dllm's own outputs exist (#64). The comparison's bound comes from the
+  LLaDA evidence plus a check on each row's largest logit, and every case
+  records how far the reference lies from itself. `bench/check_dg_bound.py`
+  shows the bound rejecting a missing final soft-cap and a dropped layer scale
+  (`bench/checks/2026-11-04-dg-bound.json`). The tokenizer goldens for `gemma4`
   are in `tests/fixtures/gemma4-tokenizer-golden.tsv`, with their provenance.
 - DiffusionGemma's entropy-bounded denoiser (`_generate_diffusion_gemma`,
   issue #65): a random canvas over the whole vocabulary, a per-position
