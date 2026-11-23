@@ -14,13 +14,14 @@ if [ ! -x "$bin" ]; then
 fi
 
 # run_env VAR=value ARGS... -> sets globals rc/out/err (stdout, stderr split).
+err_file="$(mktemp)" || exit 1
+trap 'rm -f "$err_file"' EXIT
 run_env() {
     local var=$1
     shift
-    out="$(env "$var" "$bin" run --model "$model" --prompt hi "$@" 2>/tmp/env_err.$$)"
+    out="$(env "$var" "$bin" run --model "$model" --prompt hi "$@" 2>"$err_file")"
     rc=$?
-    err="$(cat /tmp/env_err.$$)"
-    rm -f /tmp/env_err.$$
+    err="$(cat "$err_file")"
 }
 
 fail() {
