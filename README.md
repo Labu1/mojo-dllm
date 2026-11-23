@@ -7,7 +7,7 @@
 <p align="center"><em>Local inference for diffusion language models, written in Mojo.</em></p>
 
 <p align="center">
-  <a href="https://github.com/vladimirrott/mojo-dllm/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/vladimirrott/mojo-dllm/ci.yml?branch=main&style=flat-square&label=CI" alt="CI"></a>
+  <a href="https://github.com/dllm-labs/mojo-dllm/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/dllm-labs/mojo-dllm/ci.yml?branch=main&style=flat-square&label=CI" alt="CI"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue?style=flat-square" alt="License: Apache-2.0"></a>
   <img src="https://img.shields.io/badge/Mojo-1.1.0-ff6b1a?style=flat-square" alt="Mojo 1.1.0">
   <img src="https://img.shields.io/badge/models-LLaDA--8B%20%7C%20LLaDA--1.5%20%7C%20Dream--7B%20%7C%20Dream--Coder%20%7C%20DiffuCoder--cpGRPO-5eead4?style=flat-square" alt="Models: LLaDA-8B, LLaDA-1.5, Dream-7B, Dream-Coder, DiffuCoder-cpGRPO">
@@ -132,7 +132,7 @@ the ablation row measures.
 
 ```bash
 curl -LsSf https://astral.sh/uv/install.sh | sh    # skip if you have uv
-git clone https://github.com/vladimirrott/mojo-dllm && cd mojo-dllm
+git clone https://github.com/dllm-labs/mojo-dllm && cd mojo-dllm
 ./mojo-dllm setup
 ./mojo-dllm run "Explain speculative decoding in two sentences."
 ```

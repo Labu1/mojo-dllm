@@ -9,8 +9,8 @@ src = "docs"
 default-theme = "navy"
 preferred-dark-theme = "navy"
 site-url = "/mojo-dllm/"
-git-repository-url = "https://github.com/vladimirrott/mojo-dllm"
-edit-url-template = "https://github.com/vladimirrott/mojo-dllm/edit/main/{path}"
+git-repository-url = "https://github.com/dllm-labs/mojo-dllm"
+edit-url-template = "https://github.com/dllm-labs/mojo-dllm/edit/main/{path}"
 additional-css = ["theme/custom.css"]
 
 [output.html.fold]
