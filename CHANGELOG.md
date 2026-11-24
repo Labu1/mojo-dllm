@@ -6,6 +6,8 @@ semantic versioning (0.y: minor bumps may break things).
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-24
+
 ### Added
 
 - A `scorecard` workflow runs the OpenSSF Scorecard weekly, on pushes to main and when branch protection changes, and

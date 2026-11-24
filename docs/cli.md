@@ -26,7 +26,7 @@ stops the run (see [Errors](#errors)).
 commit the binary was built from on its second, then exits 0:
 
 ```text
-mojo-dllm 0.2.0
+mojo-dllm 0.3.0
 commit: abc123456789
 ```
 
