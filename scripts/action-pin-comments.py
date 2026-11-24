@@ -50,20 +50,30 @@ def references(document):
 VERSION_INPUTS = {"trufflesecurity/trufflehog"}
 
 
-def version_inputs(document):
-    """Yield (uses node, version node) for each workflow step with a `version` input."""
+def steps_of(document):
+    """Yield every step: those of a composite action (`runs.steps`) and those of each job."""
+    for runs in entries(document, "runs"):
+        for steps in entries(runs, "steps"):
+            yield from steps.value
     for jobs in entries(document, "jobs"):
         for _, job in jobs.value:
             for steps in entries(job, "steps"):
-                for step in steps.value:
-                    for uses in entries(step, "uses"):
-                        for inputs in entries(step, "with"):
-                            for version in entries(inputs, "version"):
-                                yield uses, version
+                yield from steps.value
+
+
+def version_inputs(document):
+    """Yield (uses node, version node) for each step; the version node is None when the step has no `version` input."""
+    for step in steps_of(document):
+        for uses in entries(step, "uses"):
+            versions = [version for inputs in entries(step, "with") for version in entries(inputs, "version")]
+            yield uses, versions[0] if versions else None
 
 
 def check_version(action, claim, version):
     expected = claim.removeprefix("v")
+    if version is None:
+        raise ValueError(f"{action} has no version input, so the action runs its default, latest; "
+                         f"its pin comment {claim} needs {expected!r}")
     if not isinstance(version, ScalarNode) or version.value != expected:
         found = version.value if isinstance(version, ScalarNode) else "a non-scalar"
         raise ValueError(f"{action} passes version {found!r}, but its pin comment {claim} needs {expected!r}")
