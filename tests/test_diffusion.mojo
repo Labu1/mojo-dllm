@@ -57,6 +57,11 @@ def test_dream_transfer_schedule_matches_timestep_equation() raises:
     assert_equal(dream_n_transfer(100, 1, 4, 0.001), 33)
     assert_equal(dream_n_transfer(100, 2, 4, 0.001), 49)
     assert_equal(dream_n_transfer(100, 3, 4, 0.001), 100)
+    # eps = 0 is the edge the CLI accepts: t runs from 1 down to 1/steps, never to 0.
+    assert_equal(dream_n_transfer(100, 0, 4, 0.0), 25)
+    assert_equal(dream_n_transfer(100, 1, 4, 0.0), 33)
+    assert_equal(dream_n_transfer(100, 2, 4, 0.0), 50)
+    assert_equal(dream_n_transfer(100, 3, 4, 0.0), 100)
 
 
 def test_select_top_is_stable_on_ties() raises:

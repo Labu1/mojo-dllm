@@ -53,6 +53,20 @@ def test_local_reference_outside_its_state_bound_stops_before_candidate(tmp_path
         parity.dg_compare(tmp_path, bound)
 
 
+@pytest.mark.parametrize("label", ["cached vs unified", "cached-sc vs unified-sc"])
+def test_a_reference_control_that_lacks_a_canvas_row_stops_before_candidate(tmp_path: Path, label: str) -> None:
+    case, _, meta = fixture(tmp_path)
+    meta["ref_spread"] = reference_controls()
+    meta["ref_spread"][label]["rows"] = meta["canvas_length"] - 1
+    (case / "case.json").write_text(json.dumps(meta))
+    limits = dict(min_cosine=0.9, argmax_fraction=1.0, mean_top5_overlap=2.0,
+                  max_rel_rms=0.5, max_top1_rel_err=0.0)
+    bound = dict(protocol="dg-fixed-input-v1", model=meta["model"], llama_cpp_commit="pin",
+                 cases={"fixed": dict(inputs=meta, states={"no-sc": limits, "sc": limits})})
+    with pytest.raises(SystemExit, match=f"lacks a complete ref_spread for {label}"):
+        parity.dg_compare(tmp_path, bound)
+
+
 def runtime_command(*, sc: bool = False, code: str = "") -> list[str]:
     program = "import pathlib,struct,sys; pathlib.Path(sys.argv[1]).write_bytes(struct.pack('<2f',1.,2.)); " + code
     command = [sys.executable, "-c", program, "{out}", "{model}", "{case_json}", "{variant}"]
