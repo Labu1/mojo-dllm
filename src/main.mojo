@@ -2,7 +2,7 @@
 
     mojo-dllm run      --model M (--prompt TEXT | --prompt-file PATH) [--max-tokens N] [--steps N] [--block-length N]
                        [--seed N] [--temperature T] [--threads N] [--device cpu|gpu]
-                       [--remasking S] [--threshold P] [--dual-cache]
+                       [--remasking S] [--threshold P] [--eps F] [--dual-cache]
                        [--no-chat] [--full-logits] [--no-early-stop] [--no-suppress-mask]
                        [--visual] [--visual-interval N] [--verbose]
                        [--dump-step-stats] [--json]
@@ -102,6 +102,7 @@ def command_spec(command: String) raises -> CommandSpec:
                 "temperature",
                 "remasking",
                 "threshold",
+                "eps",
                 "seed",
                 "threads",
                 "device",
@@ -146,7 +147,7 @@ def command_usage(command: String) raises -> String:
     if command == "run":
         return (
             "  mojo-dllm run --model M (--prompt TEXT | --prompt-file PATH)"
-            " [--max-tokens 128] [--steps 128] [--block-length 32]\n"
+            " [--max-tokens 128] [--steps 128] [--eps 0.001] [--block-length 32]\n"
             + "                [--seed 42] [--temperature 0] [--threads N]"
             " [--device cpu|gpu]\n"
             + "                [--remasking S] [--threshold P] [--dual-cache]\n"
@@ -363,6 +364,7 @@ def _number_problems(a: Args) raises -> String:
         "eb-confidence",
         "temperature",
         "threshold",
+        "eps",
         "prev-temp-inv",
     ]:
         if not _given(a, flag):
@@ -715,6 +717,10 @@ def sampler_json(arch: String, cfg: GenConfig) -> String:
 def check_arch_flags(a: Args, arch: String) raises:
     """Refuse a flag the model's architecture ignores: a run that quietly
     takes another number of steps than asked for is a wrong answer."""
+    if a.has("eps") and arch != "dream":
+        if arch == "llada":
+            raise Error("--eps applies to Dream; LLaDA uses --block-length")
+        raise Error("--eps applies to Dream, not " + arch)
     if arch == "diffusion-gemma":
         if a.has("steps"):
             raise Error(
@@ -824,6 +830,7 @@ def gen_config(a: Args) raises -> GenConfig:
     cfg.temperature = a.float_or("temperature", 0.0)
     cfg.remasking = a.get_or("remasking", "low_confidence")
     cfg.threshold = a.float_or("threshold", 0.0)
+    cfg.eps = a.float_or("eps", 1e-3)
     cfg.full_logits = a.has("full-logits")
     cfg.dual_cache = a.has("dual-cache")
     cfg.suppress_mask = not a.has("no-suppress-mask")

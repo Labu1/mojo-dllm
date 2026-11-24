@@ -45,6 +45,7 @@ Git metadata. A binary keeps reporting the commit it was built from after
 | `--prompt-file PATH` | none | read the user message from a file instead of `--prompt`; `-` reads standard input; the binary removes one trailing newline; cannot combine with `--prompt` |
 | `--max-tokens N` | 128 | tokens to generate (the masked canvas). The prompt tokens plus N must not exceed the file's `<arch>.context_length` (4096 when the key is absent); the check runs after the header is read and before any weight is mapped |
 | `--steps N` | `--max-tokens` | denoising steps; a multiple of the block count |
+| `--eps F` | 0.001 | Dream: final timestep; must be at least 0 and less than 1. LLaDA uses its block schedule and refuses this flag |
 | `--block-length N` | 32, or `--max-tokens` when that is smaller | LLaDA's semi-autoregressive block size; must divide `--max-tokens`. A Dream run refuses it |
 | `--temperature T` | 0 | LLaDA: 0 is greedy; above 0 adds Gumbel noise as LLaDA does. Dream supports only 0 and stops with an error above it |
 | `--remasking S` | `low_confidence` | LLaDA: `low_confidence` or `random`. Dream: `entropy` (the default), `maskgit_plus`, `topk_margin`, `origin`, or llama.cpp-style `random` |
