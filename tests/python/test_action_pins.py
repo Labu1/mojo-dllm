@@ -302,3 +302,101 @@ def test_a_hash_inside_a_quoted_value_on_the_same_line_is_not_the_comment(rig: R
     p = extract(rig)
     assert p.returncode == 0, p.stderr
     assert p.stdout.split("\t")[2] == "v4"
+
+
+# The TruffleHog `version` input (#146) ------------------------------------------------------------------------
+
+def trufflehog(rig: Rig, claim: str, version: str) -> None:
+    rig.workflow(f"""\
+        name: t
+        on: push
+        jobs:
+          j:
+            runs-on: ubuntu-24.04
+            steps:
+              - uses: trufflesecurity/trufflehog@{SHA}  # {claim}
+                with:
+                  version: "{version}"
+        """)
+
+
+def test_a_trufflehog_version_equal_to_its_pin_comment_passes(rig: Rig) -> None:
+    trufflehog(rig, "v3.99.8", "3.99.8")
+    p = extract(rig)
+    assert p.returncode == 0, p.stderr
+    assert p.stdout.split("\t")[2] == "v3.99.8"
+
+
+@pytest.mark.parametrize("version", ["3.99.7", "v3.99.8", "latest", ""])
+def test_a_trufflehog_version_that_differs_from_its_pin_comment_is_refused(rig: Rig, version: str) -> None:
+    trufflehog(rig, "v3.99.8", version)
+    p = extract(rig)
+    assert p.returncode != 0 and "trufflesecurity/trufflehog" in p.stderr and "3.99.8" in p.stderr, p.stderr
+
+
+def test_a_trufflehog_version_mismatch_fails_the_gate(rig: Rig) -> None:
+    trufflehog(rig, "v3.99.8", "3.99.7")
+    rig.table["refs"]["trufflesecurity/trufflehog@v3.99.8"] = ["commit", SHA]
+    p = rig.run()
+    assert p.returncode == 1 and "checked" not in p.stdout and rig.gh_calls() == []
+
+
+# The action's `version` default is `latest`, so a step that drops the input floats off its pin; and a composite
+# action under .github/actions holds steps of its own, which the check must read as well as the workflows.
+
+def test_a_trufflehog_step_without_any_inputs_is_refused(rig: Rig) -> None:
+    rig.workflow(f"""\
+        name: t
+        on: push
+        jobs:
+          j:
+            runs-on: ubuntu-24.04
+            steps:
+              - uses: trufflesecurity/trufflehog@{SHA}  # v3.99.8
+        """)
+    p = extract(rig)
+    assert p.returncode != 0 and "trufflesecurity/trufflehog" in p.stderr and "no version input" in p.stderr, p.stderr
+
+
+def test_a_trufflehog_step_with_other_inputs_but_no_version_is_refused(rig: Rig) -> None:
+    rig.workflow(f"""\
+        name: t
+        on: push
+        jobs:
+          j:
+            runs-on: ubuntu-24.04
+            steps:
+              - uses: trufflesecurity/trufflehog@{SHA}  # v3.99.8
+                with:
+                  base: main
+        """)
+    p = extract(rig)
+    assert p.returncode != 0 and "no version input" in p.stderr, p.stderr
+
+
+def composite_trufflehog(rig: Rig, *with_lines: str) -> None:
+    rig.uses(f"actions/checkout@{SHA}  # v4")  # the check wants at least one workflow
+    folder = rig.root / ".github/actions/scan"
+    folder.mkdir(parents=True)
+    lines = ["name: scan", "description: d", "runs:", "  using: composite", "  steps:",
+             f"    - uses: trufflesecurity/trufflehog@{SHA}  # v3.99.8", *with_lines]
+    (folder / "action.yml").write_text("\n".join(lines) + "\n")
+
+
+def test_a_composite_action_trufflehog_version_equal_to_its_pin_comment_passes(rig: Rig) -> None:
+    composite_trufflehog(rig, "      with:", '        version: "3.99.8"')
+    p = extract(rig)
+    assert p.returncode == 0, p.stderr
+    assert f"trufflesecurity/trufflehog\t{SHA}\tv3.99.8\t" in p.stdout
+
+
+def test_a_composite_action_trufflehog_version_that_differs_is_refused(rig: Rig) -> None:
+    composite_trufflehog(rig, "      with:", '        version: "3.99.7"')
+    p = extract(rig)
+    assert p.returncode != 0 and "trufflesecurity/trufflehog" in p.stderr and "3.99.8" in p.stderr, p.stderr
+
+
+def test_a_composite_action_trufflehog_step_without_a_version_is_refused(rig: Rig) -> None:
+    composite_trufflehog(rig)
+    p = extract(rig)
+    assert p.returncode != 0 and "no version input" in p.stderr, p.stderr

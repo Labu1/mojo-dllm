@@ -1,10 +1,10 @@
 test_args 28
-test_cli 105
+test_cli 113
 test_dg_cache 10
 test_dg_forward 17
 test_dg_selfcond 9
 test_diffusion 60
-test_diffusion_gemma 39
+test_diffusion_gemma 41
 test_entropy_bound 40
 test_gemma4_tiny 37
 test_gguf 9

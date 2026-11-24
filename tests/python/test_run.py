@@ -160,6 +160,20 @@ def test_run_says_why_there_is_no_gpu(monkeypatch: pytest.MonkeyPatch, tmp_path:
     assert "device: cpu (nvidia-smi failed: timed out after 60 s)" in capsys.readouterr().err
 
 
+def test_run_uses_the_cpu_when_nvidia_smi_output_is_unreadable(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(runcmd, "ensure_built", lambda: False)
+    monkeypatch.setattr(runcmd, "ensure_model", lambda *a, **k: tmp_path / "m.gguf")
+    monkeypatch.setattr(runcmd, "BINARY", tmp_path / "absent")
+    _smi(monkeypatch, lambda *a, **k: subprocess.CompletedProcess(a, 0, "garbage\n", ""))
+    # The absent binary ends the run at the hand-off, past device detection.
+    with pytest.raises(LauncherError, match="cannot start"):
+        runcmd.cmd_run(["hi"])
+    line = "device: cpu (nvidia-smi failed: nvidia-smi printed a line the launcher cannot read: 'garbage')"
+    assert line in capsys.readouterr().err
+
+
 def test_a_missing_binary_in_run_names_doctor(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setattr(runcmd, "ensure_built", lambda: False)
     monkeypatch.setattr(runcmd, "ensure_model", lambda *a, **k: tmp_path / "m.gguf")
@@ -393,9 +407,7 @@ def test_nvidia_smi_succeeding_with_no_output_is_no_gpu_and_no_failure(monkeypat
     assert runcmd.detect_gpus() == ([], None)
 
 
-def test_nvidia_smi_succeeding_with_garbage_aborts_run_and_names_cpu(monkeypatch: pytest.MonkeyPatch) -> None:
-    # Intended today: an unreadable listing stops `run --device auto` (the message says to pass --device cpu).
-    # Issue #81 covers whether it should fall back to the CPU instead.
+def test_nvidia_smi_output_that_cannot_be_parsed_is_reported(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Like the failures above, an unreadable listing is no usable GPU and a reason, not an error (issue #81).
     _smi_result(monkeypatch, 0, "garbage\n", "")
-    with pytest.raises(LauncherError, match="--device cpu"):
-        runcmd.detect_gpus()
+    assert runcmd.detect_gpus() == ([], "nvidia-smi printed a line the launcher cannot read: 'garbage'")

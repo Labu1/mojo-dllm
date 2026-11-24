@@ -36,6 +36,9 @@ from main import (
     gemma_only_flags,
     is_top_level_help,
     model_error,
+    prompt_path,
+    read_prompt_file,
+    resolve_prompt,
     version_line,
     sampler_json,
     peak_rss_bytes,
@@ -205,10 +208,10 @@ def _check(command: String, rest: List[String]) raises -> String:
 
 def test_every_command_declares_its_flags() raises:
     var run = command_spec("run")
-    assert_equal(len(run.values), 18)
+    assert_equal(len(run.values), 19)
     assert_equal(len(run.booleans), 9)
     var tokenize = command_spec("tokenize")
-    assert_equal(len(tokenize.values), 2)
+    assert_equal(len(tokenize.values), 3)
     assert_equal(len(tokenize.booleans), 1)
     var inspect = command_spec("inspect")
     assert_equal(len(inspect.values), 0)
@@ -310,6 +313,8 @@ def test_complete_commands_pass_the_check() raises:
         "",
     )
     assert_equal(_check("tokenize", ["--model", "m", "--prompt", "p"]), "")
+    assert_equal(_check("run", ["--model", "m", "--prompt-file", "f"]), "")
+    assert_equal(_check("tokenize", ["--model", "m", "--prompt-file", "f"]), "")
     assert_equal(
         _check(
             "logits",
@@ -322,14 +327,20 @@ def test_complete_commands_pass_the_check() raises:
 def test_usage_for_one_command() raises:
     var run = usage_for("run")
     assert_true(
-        run.startswith("usage:\n  mojo-dllm run --model M --prompt TEXT")
+        run.startswith(
+            "usage:\n  mojo-dllm run --model M (--prompt TEXT | --prompt-file"
+            " PATH)"
+        )
     )
     assert_true(not run.__contains__("mojo-dllm tokenize"))
     assert_true(not run.endswith("\n"))
     var tokenize = usage_for("tokenize")
     assert_equal(
         tokenize,
-        "usage:\n  mojo-dllm tokenize --model M --prompt TEXT [--no-chat]",
+        (
+            "usage:\n  mojo-dllm tokenize --model M (--prompt TEXT |"
+            " --prompt-file PATH) [--no-chat]"
+        ),
     )
     with assert_raises(contains="unknown command: nope"):
         _ = usage_for("nope")
@@ -1225,6 +1236,140 @@ def test_non_gguf_file_hint() raises:
     )
 
 
+def test_prompt_and_prompt_file_conflict() raises:
+    for command in List[String](["run", "tokenize"]):
+        var message = _check(
+            command, ["--model", "m", "--prompt", "a", "--prompt-file", "b"]
+        )
+        assert_equal(
+            message,
+            "--prompt and --prompt-file cannot be combined for '"
+            + command
+            + "'\nsee: mojo-dllm "
+            + command
+            + " --help",
+        )
+    assert_equal(
+        execute(
+            [
+                "mojo-dllm",
+                "run",
+                "--model",
+                "m",
+                "--prompt",
+                "a",
+                "--prompt-file",
+                "b",
+            ]
+        ),
+        2,
+    )
+
+
+def test_prompt_file_stands_in_for_prompt() raises:
+    assert_equal(_check("run", ["--model", "m", "--prompt-file", "f"]), "")
+    assert_equal(_check("tokenize", ["--model", "m", "--prompt-file", "f"]), "")
+
+
+def test_read_prompt_file_drops_one_trailing_newline() raises:
+    var path = "build/tests/prompt.txt"
+    for content in List[String](["hello\n", "hello", "hello\r\n", "hello\n\n"]):
+        with open(path, "w") as f:
+            f.write(content)
+        var a = _parse("run", ["--model", "m", "--prompt-file", path])
+        var expected = "hello\n" if content == "hello\n\n" else "hello"
+        assert_equal(read_prompt_file(a), expected)
+    remove(path)
+
+
+def test_read_prompt_file_names_a_missing_file() raises:
+    var a = _parse(
+        "run", ["--model", "m", "--prompt-file", "build/tests/absent.txt"]
+    )
+    var message = String("")
+    try:
+        _ = read_prompt_file(a)
+    except e:
+        message = String(e)
+    assert_true(
+        message.startswith("cannot read prompt file build/tests/absent.txt:")
+    )
+
+
+def test_prompt_path_maps_dash_to_stdin() raises:
+    var a = _parse("run", ["--model", "m", "--prompt-file", "-"])
+    assert_equal(prompt_path(a), "/dev/stdin")
+    var b = _parse("run", ["--model", "m", "--prompt-file", "file.txt"])
+    assert_equal(prompt_path(b), "file.txt")
+
+
+def test_resolve_prompt_fills_the_prompt() raises:
+    var path = "build/tests/prompt.txt"
+    with open(path, "w") as f:
+        f.write("hi\n")
+    var a = _parse("run", ["--model", "m", "--prompt-file", path])
+    resolve_prompt(a)
+    assert_equal(a.get("prompt"), "hi")
+    remove(path)
+
+
+def test_tokenize_prompt_file_gives_the_ids_of_the_same_prompt_text() raises:
+    # Through `execute`, the way a user reaches it. The tests above call
+    # `resolve_prompt` directly, so deleting the call in `cmd_tokenize` passed
+    # every one of them.
+    var path = "build/tests/tokenize-prompt.txt"
+    with open(path, "w") as f:
+        f.write("hello\n")
+    var model = "tests/fixtures/llada-tokenizer.gguf"
+    var from_file = _streams(
+        [
+            "mojo-dllm",
+            "tokenize",
+            "--model",
+            model,
+            "--prompt-file",
+            path,
+            "--no-chat",
+        ]
+    )
+    var from_flag = _streams(
+        [
+            "mojo-dllm",
+            "tokenize",
+            "--model",
+            model,
+            "--prompt",
+            "hello",
+            "--no-chat",
+        ]
+    )
+    remove(path)
+    assert_equal(from_file[0], 0)
+    assert_equal(from_file[2], "")
+    assert_true(from_file[1].byte_length() > 0)
+    assert_equal(from_file[1], from_flag[1])
+
+
+def test_run_reads_the_prompt_file_before_it_opens_the_model() raises:
+    # `execute` resolves the file for `run` before `cmd_run` touches the model.
+    # Without that call the same command fails on the model instead, so the
+    # error text tells the two apart.
+    var absent = "build/tests/absent-run-prompt.txt"
+    var result = _streams(
+        [
+            "mojo-dllm",
+            "run",
+            "--model",
+            "tests/fixtures/tiny-llada.gguf",
+            "--prompt-file",
+            absent,
+        ]
+    )
+    assert_equal(result[0], 1)
+    assert_equal(result[1], "")
+    assert_true(("cannot read prompt file " + absent + ":") in result[2])
+
+
 def test_other_errors_pass_through_unchanged() raises:
     assert_equal(
         model_error("unsupported model architecture: qwen2"),
@@ -1285,7 +1430,7 @@ def test_logits_refuses_rows_that_are_not_the_canvas() raises:
         all_rows.append(r)
     with assert_raises(contains="--rows must be 9,10"):
         _logits_gemma(DG_TINY, 1, tokens, all_rows, path)
-    with assert_raises(contains="below the canvas length 16"):
+    with assert_raises(contains="--tokens needs at least 16 tokens, got 15"):
         _logits_gemma(DG_TINY, 1, _gemma_tokens(15), List[Int](), path)
 
 
@@ -1401,7 +1546,7 @@ def test_run_option_values_are_checked_before_the_model_loads() raises:
     wants.append("flag --threshold needs a finite number, got 'inf'")
     wants.append("flag --threshold must be between 0 and 1, got -1")
     wants.append("flag --threshold must be between 0 and 1, got 1.5")
-    wants.append("flag --device must be cpu or gpu, got 'foo'")
+    wants.append("unknown device: foo (expected cpu or gpu)")
     wants.append(
         "flag --remasking must be one of low_confidence, random, entropy,"
         " maskgit_plus, topk_margin, origin, got 'foo'"
@@ -1611,7 +1756,7 @@ def test_logits_option_values_are_checked_before_the_model_loads() raises:
     var device = base.copy()
     device.append("--device")
     device.append("tpu")
-    _same("logits", device, "flag --device must be cpu or gpu, got 'tpu'")
+    _same("logits", device, "unknown device: tpu (expected cpu or gpu)")
 
 
 def test_a_bad_option_exits_two_without_opening_the_model() raises:
@@ -1642,7 +1787,7 @@ def test_logits_checks_rows_and_prev_before_the_weights_load() raises:
             bad, 1, _gemma_tokens(25), _rows(9), path, "unified", short, 1.25
         )
     remove(short)
-    with assert_raises(contains="below the canvas length 16"):
+    with assert_raises(contains="--tokens needs at least 16 tokens, got 15"):
         _logits_gemma(bad, 1, _gemma_tokens(15), List[Int](), path)
 
 
@@ -2205,6 +2350,13 @@ def test_logits_refuses_an_unknown_device() raises:
     )
     with assert_raises(contains="unknown device: tpu (expected cpu or gpu)"):
         cmd_logits(a)
+    var gemma = Args(
+        _logits_args("0", "build/never-written.f32", "tpu"),
+        spec.values,
+        spec.booleans,
+    )
+    with assert_raises(contains="unknown device: tpu (expected cpu or gpu)"):
+        cmd_logits(gemma)
     assert_true(not exists("build/never-written.f32"))
 
 

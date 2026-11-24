@@ -136,6 +136,54 @@ def test_a_mistyped_command_builds_nothing_and_names_the_closest(
     assert err.startswith("error:") and "did you mean doctor?" in err and "./mojo-dllm help" in err
 
 
+def _forbid_probes(monkeypatch: pytest.MonkeyPatch) -> None:
+    def forbidden(*args: object, **kwargs: object) -> None:
+        raise AssertionError("a rejected doctor command must not probe the machine")
+
+    monkeypatch.setattr(cli, "real_probes", forbidden)
+
+
+def test_doctor_rejects_an_unknown_option(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _forbid_probes(monkeypatch)
+    assert cli.main(["doctor", "--jsno"]) == 2
+    out, err = capsys.readouterr()
+    assert err.startswith("error:") and "unknown option --jsno for doctor" in err
+    assert out == ""
+
+
+def test_doctor_rejects_a_stray_word(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _forbid_probes(monkeypatch)
+    assert cli.main(["doctor", "now"]) == 2
+    out, err = capsys.readouterr()
+    assert err.startswith("error:") and "unexpected argument 'now'" in err
+    assert out == ""
+
+
+def test_doctor_still_runs_without_arguments(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(cli, "real_probes", make_probes)
+    assert cli.main(["doctor"]) == 0
+    lines = capsys.readouterr().out.splitlines()
+    assert len(lines) == 8 and all(line.startswith("✓") for line in lines)
+    # The patch reaches the code under test, so the rejections above are not
+    # passing because doctor never ran.
+    monkeypatch.setattr(cli, "real_probes", lambda: make_probes(glibc="2.31"))
+    assert cli.main(["doctor"]) == 1
+
+
+def test_doctor_help_still_wins(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _forbid_probes(monkeypatch)
+    assert cli.main(["doctor", "--help"]) == 0
+    assert "Quick start" in capsys.readouterr().out
+
+
 def test_version_prints_the_pyproject_version_and_builds_nothing(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -241,7 +289,7 @@ def test_ctrl_c_is_one_line_and_exit_130(
     assert err == "interrupted\n"
 
 
-@pytest.mark.parametrize("command", ["run", "pull", "doctor"])
+@pytest.mark.parametrize("command", ["run", "pull"])
 @pytest.mark.parametrize("flag", ["-h", "--help"])
 def test_help_after_double_dash_is_not_a_help_request(
     command: str, flag: str, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
@@ -255,11 +303,13 @@ def test_help_after_double_dash_is_not_a_help_request(
     assert seen, "the command did not run: help was printed instead"
 
 
+# doctor takes no words either, so it refuses them the same way (#80).
+@pytest.mark.parametrize("command", ["setup", "doctor"])
 @pytest.mark.parametrize("flag", ["-h", "--help"])
 def test_setup_takes_no_words_after_double_dash_and_says_so_instead_of_printing_help(
-    flag: str, capsys: pytest.CaptureFixture[str]
+    command: str, flag: str, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    assert cli.main(["setup", "--", flag]) == 2
+    assert cli.main([command, "--", flag]) == 2
     captured = capsys.readouterr()
     assert "Quick start" not in captured.out and captured.err.startswith("error:")
 

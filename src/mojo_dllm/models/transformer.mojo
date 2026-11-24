@@ -635,6 +635,10 @@ def _check_diffusion_gemma_tensors(g: GGUFFile, c: ModelConfig) raises:
     must carry `expert_count` experts of `expert_feed_forward_length`.
     """
     var a = String(GEMMA_ARCH) + "."
+    if g.has_tensor("output.weight"):
+        raise Error(
+            "unsupported tensor output.weight: the head uses token_embd.weight"
+        )
     _expect_shape(
         g,
         GEMMA_TOKEN_EMBD,
@@ -650,6 +654,22 @@ def _check_diffusion_gemma_tensors(g: GGUFFile, c: ModelConfig) raises:
         )
     for i in range(c.n_layers):
         var p = "blk." + String(i) + "."
+        for projection in [
+            "attn_q",
+            "attn_k",
+            "attn_v",
+            "attn_output",
+            "ffn_gate",
+            "ffn_up",
+            "ffn_down",
+        ]:
+            var scale = p + projection + ".scale"
+            if g.has_tensor(scale):
+                raise Error(
+                    "unsupported tensor "
+                    + scale
+                    + ": projection scales are not applied"
+                )
         var kind = "sliding" if c.is_sliding(i) else "global"
         var v = p + GEMMA_ATTN_V
         if c.is_sliding(i) and not g.has_tensor(v):
