@@ -134,6 +134,8 @@ def float_flag_rule(flag: String, x: Float64) -> String:
         return "must be above 0" if x <= 0 else ""
     if flag == "threshold":
         return "must be between 0 and 1" if x < 0 or x > 1 else ""
+    if flag == "eps":
+        return "must be at least 0 and less than 1" if x < 0 or x >= 1 else ""
     # temperature, eb-t-min, eb-bound, eb-confidence
     return "must be at least 0" if x < 0 else ""
 
@@ -240,6 +242,26 @@ def num_transfer_tokens(m: Int, steps: Int) -> List[Int]:
     for i in range(m % steps):
         out[i] += 1
     return out^
+
+
+def dream_transfer_probability(i: Int, steps: Int, eps: Float64) -> Float64:
+    """The share of the masked positions Dream commits at step `i`.
+
+    The final step commits every remaining position. Before it, the schedule
+    uses t = 1 - i(1-eps)/steps and s = 1 - (i+1)(1-eps)/steps, and the share
+    is 1 - s/t. `origin` remasking uses it as a probability per position.
+    """
+    if i >= steps - 1:
+        return 1.0
+    var t = 1.0 - Float64(i) * (1.0 - eps) / Float64(steps)
+    var s = 1.0 - Float64(i + 1) * (1.0 - eps) / Float64(steps)
+    return 1.0 - s / t
+
+
+def dream_n_transfer(n_masked: Int, i: Int, steps: Int, eps: Float64) -> Int:
+    """Dream's number of masked positions to commit at step `i`: the share
+    from `dream_transfer_probability` of `n_masked`, rounded down."""
+    return Int(Float64(n_masked) * dream_transfer_probability(i, steps, eps))
 
 
 def select_top(conf: List[Float64], k: Int) -> List[Int]:
@@ -788,11 +810,7 @@ def _generate_dream[
                     raise _refuse_non_finite(cand[j] - P, res.forward_passes)
             x0 = greedy[0].copy()
             conf = greedy[1].copy()
-        var p_transfer = Float64(1.0)
-        if i < cfg.steps - 1:
-            var t = 1.0 - Float64(i) * (1.0 - cfg.eps) / Float64(cfg.steps)
-            var s = 1.0 - Float64(i + 1) * (1.0 - cfg.eps) / Float64(cfg.steps)
-            p_transfer = 1.0 - s / t
+        var p_transfer = dream_transfer_probability(i, cfg.steps, cfg.eps)
         var committed = List[Int]()
         if algorithm == "origin":
             for j in range(len(cand)):
@@ -803,7 +821,7 @@ def _generate_dream[
             if algorithm == "random":
                 for j in range(len(cand)):
                     conf[j] = rng.uniform()
-            var n_transfer = Int(Float64(len(cand)) * p_transfer)
+            var n_transfer = dream_n_transfer(len(cand), i, cfg.steps, cfg.eps)
             if n_transfer > 0:
                 for j in select_top(conf, n_transfer):
                     res.tokens[cand[j]] = x0[j]

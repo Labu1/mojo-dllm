@@ -183,6 +183,84 @@ def _heap_pop(mut h: List[_Bigram]) -> _Bigram:
     return top
 
 
+def longest_first(lengths: List[Int]) -> List[Int]:
+    """The positions 0 to n-1 ordered by descending `lengths`, equal lengths in
+    rising position.
+
+    A stable bottom-up merge sort, O(n log n): a file can mark every token as
+    control, and an insertion sort over 262,144 texts of rising length would
+    not finish (issue #171). llama.cpp uses `std::sort`.
+    """
+    var n = len(lengths)
+    var a = List[Int](capacity=n)
+    for i in range(n):
+        a.append(i)
+    var b = List[Int](length=n, fill=0)
+    var width = 1
+    while width < n:
+        var lo = 0
+        while lo < n:
+            var mid = min(lo + width, n)
+            var hi = min(lo + 2 * width, n)
+            var i = lo
+            var j = mid
+            var k = lo
+            while i < mid and j < hi:
+                # The right run goes first only when strictly longer: stable.
+                if lengths[a[j]] > lengths[a[i]]:
+                    b[k] = a[j]
+                    j += 1
+                else:
+                    b[k] = a[i]
+                    i += 1
+                k += 1
+            while i < mid:
+                b[k] = a[i]
+                i += 1
+                k += 1
+            while j < hi:
+                b[k] = a[j]
+                j += 1
+                k += 1
+            lo = hi
+        var t = a^
+        a = b^
+        b = t^
+        width *= 2
+    return a^
+
+
+def end_of_generation_ids(
+    ids: Dict[String, Int], eos_id: Int, eot_id: Int, eom_id: Int
+) raises -> List[Int]:
+    """The ids that end generation, each once, as llama.cpp collects them
+    (`src/llama-vocab.cpp:3276-3330` at 2e715c0639): the tokens with the texts
+    `<eos>`, `<turn|>` and `<|tool_response>`, and the ids stored under
+    `tokenizer.ggml.eos_token_id`, `eot_token_id` and `eom_token_id` when they
+    are set (-1 here when absent). `<eos>` ends generation by its text even
+    when `eos_token_id` is missing or names another token."""
+    var candidates: List[Int] = [
+        eos_id,
+        ids.get("<eos>", -1),
+        ids.get("<turn|>", -1),
+        ids.get("<|tool_response>", -1),
+        eot_id,
+        eom_id,
+    ]
+    var out = List[Int]()
+    for c in candidates:
+        if c < 0:
+            continue
+        var seen = False
+        for e in out:
+            if e == c:
+                seen = True
+                break
+        if not seen:
+            out.append(c)
+    return out^
+
+
 struct Gemma4Vocab(Movable):
     """The vocabulary, merges and special-token rules of a gemma4 tokenizer."""
 
@@ -205,7 +283,7 @@ struct Gemma4Vocab(Movable):
     var add_bos: Bool
     var add_eos: Bool
     var eog: List[Int]
-    """End-of-generation ids: EOS, `<turn|>` and `<|tool_response>`."""
+    """End-of-generation ids, each once: see `end_of_generation_ids`."""
 
     def __init__(out self):
         self.tokens = List[String]()
@@ -301,18 +379,16 @@ struct Gemma4Vocab(Movable):
                 & (ATTR_CONTROL | ATTR_USER_DEFINED | ATTR_UNKNOWN)
             ) != 0:
                 self.specials.append(i)
-        # Longest text first (llama.cpp sorts by length, unstably); ties by id.
-        for a in range(1, len(self.specials)):
-            var v = self.specials[a]
-            var b = a - 1
-            while (
-                b >= 0
-                and self.tokens[self.specials[b]].byte_length()
-                < self.tokens[v].byte_length()
-            ):
-                self.specials[b + 1] = self.specials[b]
-                b -= 1
-            self.specials[b + 1] = v
+        # Longest text first (llama.cpp sorts by length, unstably); ties by id,
+        # since the ids were collected in rising order and the sort is stable.
+        var lengths = List[Int](capacity=len(self.specials))
+        for sid in self.specials:
+            lengths.append(self.tokens[sid].byte_length())
+        var order = longest_first(lengths)
+        var by_length = List[Int](capacity=len(order))
+        for k in order:
+            by_length.append(self.specials[k])
+        self.specials = by_length^
 
         self.bos_id = special_token_id(g, "tokenizer.ggml.bos_token_id", n)
         self.eos_id = special_token_id(g, "tokenizer.ggml.eos_token_id", n)
@@ -344,13 +420,12 @@ struct Gemma4Vocab(Movable):
                 + "; only 'never' is supported"
             )
         self.eot_id = self.ids.get("<turn|>", -1)
-        self.eog = List[Int]()
-        if self.eos_id >= 0:
-            self.eog.append(self.eos_id)
-        for name in ["<turn|>", "<|tool_response>"]:
-            var id = self.ids.get(String(name), -1)
-            if id >= 0 and id != self.eos_id:
-                self.eog.append(id)
+        self.eog = end_of_generation_ids(
+            self.ids,
+            self.eos_id,
+            special_token_id(g, "tokenizer.ggml.eot_token_id", n),
+            special_token_id(g, "tokenizer.ggml.eom_token_id", n),
+        )
 
     def vocab_size(self) -> Int:
         return len(self.tokens)
@@ -668,6 +743,9 @@ def gemma4_chat_prompt(
             )
     var out = String("<bos>")
     var first = 0
+    # Only a leading developer message needs this branch (it is renamed to
+    # system); a leading system message would print the same text through
+    # the loop. "system" stays so the branch reads as the template's.
     if roles[0] == "system" or roles[0] == "developer":
         out += "<|turn>system\n" + _trim(contents[0]) + "<turn|>\n"
         first = 1
