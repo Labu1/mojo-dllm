@@ -147,7 +147,8 @@ def command_usage(command: String) raises -> String:
     if command == "run":
         return (
             "  mojo-dllm run --model M (--prompt TEXT | --prompt-file PATH)"
-            " [--max-tokens 128] [--steps 128] [--eps 0.001] [--block-length 32]\n"
+            " [--max-tokens 128] [--steps 128] [--eps 0.001] [--block-length"
+            " 32]\n"
             + "                [--seed 42] [--temperature 0] [--threads N]"
             " [--device cpu|gpu]\n"
             + "                [--remasking S] [--threshold P] [--dual-cache]\n"
