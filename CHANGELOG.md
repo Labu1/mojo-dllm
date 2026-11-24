@@ -46,6 +46,11 @@ semantic versioning (0.y: minor bumps may break things).
 
 ### Fixed
 
+- The gemma4 tokenizer ends generation on the set llama.cpp builds (issue #171): `<eos>`, `<turn|>` and
+  `<|tool_response>` by their text, plus the ids under `tokenizer.ggml.eos_token_id`, `eot_token_id` and `eom_token_id`,
+  each once. A file whose `eos_token_id` is missing or names another token now stops at `<eos>` too. The special tokens
+  are sorted longest first with a stable merge sort instead of an insertion sort, which was quadratic in their number.
+  Neither change moves an id on the DiffusionGemma file.
 - The action-pin check fails when the TruffleHog `version` input in `secret-scan.yml` is not the release its pin comment
   names without the `v` (issue #146): a Dependabot bump moves the pin and leaves the scanner image tag behind. The
   workflow comments now say what runs: a push to main and the weekly run pass no base, so each scans the full history
