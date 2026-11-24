@@ -1313,6 +1313,63 @@ def test_resolve_prompt_fills_the_prompt() raises:
     remove(path)
 
 
+def test_tokenize_prompt_file_gives_the_ids_of_the_same_prompt_text() raises:
+    # Through `execute`, the way a user reaches it. The tests above call
+    # `resolve_prompt` directly, so deleting the call in `cmd_tokenize` passed
+    # every one of them.
+    var path = "build/tests/tokenize-prompt.txt"
+    with open(path, "w") as f:
+        f.write("hello\n")
+    var model = "tests/fixtures/llada-tokenizer.gguf"
+    var from_file = _streams(
+        [
+            "mojo-dllm",
+            "tokenize",
+            "--model",
+            model,
+            "--prompt-file",
+            path,
+            "--no-chat",
+        ]
+    )
+    var from_flag = _streams(
+        [
+            "mojo-dllm",
+            "tokenize",
+            "--model",
+            model,
+            "--prompt",
+            "hello",
+            "--no-chat",
+        ]
+    )
+    remove(path)
+    assert_equal(from_file[0], 0)
+    assert_equal(from_file[2], "")
+    assert_true(from_file[1].byte_length() > 0)
+    assert_equal(from_file[1], from_flag[1])
+
+
+def test_run_reads_the_prompt_file_before_it_opens_the_model() raises:
+    # `execute` resolves the file for `run` before `cmd_run` touches the model.
+    # Without that call the same command fails on the model instead, so the
+    # error text tells the two apart.
+    var absent = "build/tests/absent-run-prompt.txt"
+    var result = _streams(
+        [
+            "mojo-dllm",
+            "run",
+            "--model",
+            "tests/fixtures/tiny-llada.gguf",
+            "--prompt-file",
+            absent,
+        ]
+    )
+    assert_equal(result[0], 1)
+    assert_equal(result[1], "")
+    assert_true(("cannot read prompt file " + absent + ":") in result[2])
+
+
 def test_other_errors_pass_through_unchanged() raises:
     assert_equal(
         model_error("unsupported model architecture: qwen2"),
