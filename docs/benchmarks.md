@@ -156,8 +156,8 @@ llama.cpp's `llama-bench` at the same token count).
 The table above is generated from `bench/results/*.json` by
 `scripts/bench_table.py`, and CI fails if a table differs from the evidence file
 it names. Two gaps are open: `--check` passes when a table marker is missing, a
-target file is missing, or the quality or eval evidence is deleted ([#141](https://github.com/vladimirrott/mojo-dllm/issues/141)), and an
-unknown mode exits 0 ([#142](https://github.com/vladimirrott/mojo-dllm/issues/142)).
+target file is missing, or the quality or eval evidence is deleted ([#141](https://github.com/dllm-labs/mojo-dllm/issues/141)), and an
+unknown mode exits 0 ([#142](https://github.com/dllm-labs/mojo-dllm/issues/142)).
 
 ## Benchmark environment
 
@@ -862,7 +862,7 @@ server release and algorithm settings next to its row, from the arm's own `versi
   a perplexity or a task score. The only task evidence is the GSM8K run for
   `--threshold` and `--dual-cache` on LLaDA.
 - diffuse-cpp loads its own conversion of the model, so its rows are indicative.
-- No binary is published yet ([#105](https://github.com/vladimirrott/mojo-dllm/issues/105)): you build from source.
+- No binary is published yet ([#105](https://github.com/dllm-labs/mojo-dllm/issues/105)): you build from source.
 
 ## Reading the numbers
 

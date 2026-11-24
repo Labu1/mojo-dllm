@@ -1,27 +1,36 @@
 """Command line for mojo-dllm.
 
-    mojo-dllm run      --model M --prompt TEXT [--max-tokens N] [--steps N] [--block-length N]
+    mojo-dllm run      --model M (--prompt TEXT | --prompt-file PATH) [--max-tokens N] [--steps N] [--block-length N]
                        [--seed N] [--temperature T] [--threads N] [--device cpu|gpu]
-                       [--remasking S] [--threshold P] [--dual-cache]
+                       [--remasking S] [--threshold P] [--eps F] [--dual-cache]
                        [--no-chat] [--full-logits] [--no-early-stop] [--no-suppress-mask]
                        [--visual] [--visual-interval N] [--verbose]
                        [--dump-step-stats] [--json]
                        [--eb-steps N] [--eb-t-min T] [--eb-t-max T] [--eb-bound B]
                        [--eb-stability N] [--eb-confidence C]
-    mojo-dllm tokenize --model M --prompt TEXT [--no-chat]
+    mojo-dllm tokenize --model M (--prompt TEXT | --prompt-file PATH) [--no-chat]
     mojo-dllm inspect  MODEL.gguf
     mojo-dllm logits   --model M --tokens 1,2,3 --rows 0,2 --out logits.f32 [--threads N] [--device cpu|gpu]
                        [--path unified|cached] [--prev FILE --prev-temp-inv X]
 """
 
 from std.ffi import ErrNo, external_call, c_int, get_errno
+from std.collections import Dict
 from std.math import isfinite
 from std.os import getenv, remove
 from std.os.path import exists, getsize, isdir, isfile
 from std.sys import argv, exit, get_defined_string, num_logical_cores, stderr
 from std.time import perf_counter_ns
 
-from cli.args import Args, parse_csv_ints, unknown_flag_error
+from cli.args import (
+    Args,
+    env_flags,
+    env_name,
+    env_problem,
+    parse_csv_ints,
+    unknown_flag_error,
+    with_env,
+)
 from cli.visual import CanvasPrinter, prints_answer
 from mojo_dllm.formats.gguf import GGUFFile, GGUF_TYPE_ARRAY
 from mojo_dllm.formats.utf8 import utf8_first_invalid
@@ -86,12 +95,14 @@ def command_spec(command: String) raises -> CommandSpec:
             [
                 "model",
                 "prompt",
+                "prompt-file",
                 "max-tokens",
                 "steps",
                 "block-length",
                 "temperature",
                 "remasking",
                 "threshold",
+                "eps",
                 "seed",
                 "threads",
                 "device",
@@ -104,11 +115,11 @@ def command_spec(command: String) raises -> CommandSpec:
                 "eb-confidence",
             ],
             boolean_flags(),
-            ["model", "prompt"],
+            ["model"],
         )
     if command == "tokenize":
         return CommandSpec(
-            ["model", "prompt"], ["no-chat"], ["model", "prompt"]
+            ["model", "prompt", "prompt-file"], ["no-chat"], ["model"]
         )
     if command == "inspect":
         return CommandSpec([], [], [], takes_path=True)
@@ -135,8 +146,9 @@ def command_usage(command: String) raises -> String:
     """The usage lines of one command, without a trailing newline."""
     if command == "run":
         return (
-            "  mojo-dllm run --model M --prompt TEXT [--max-tokens 128]"
-            " [--steps 128] [--block-length 32]\n"
+            "  mojo-dllm run --model M (--prompt TEXT | --prompt-file PATH)"
+            " [--max-tokens 128] [--steps 128] [--eps 0.001] [--block-length"
+            " 32]\n"
             + "                [--seed 42] [--temperature 0] [--threads N]"
             " [--device cpu|gpu]\n"
             + "                [--remasking S] [--threshold P] [--dual-cache]\n"
@@ -150,7 +162,10 @@ def command_usage(command: String) raises -> String:
             " diffusion-gemma (#277))"
         )
     if command == "tokenize":
-        return "  mojo-dllm tokenize --model M --prompt TEXT [--no-chat]"
+        return (
+            "  mojo-dllm tokenize --model M (--prompt TEXT | --prompt-file"
+            " PATH) [--no-chat]"
+        )
     if command == "inspect":
         return "  mojo-dllm inspect MODEL.gguf"
     if command == "logits":
@@ -350,6 +365,7 @@ def _number_problems(a: Args) raises -> String:
         "eb-confidence",
         "temperature",
         "threshold",
+        "eps",
         "prev-temp-inv",
     ]:
         if not _given(a, flag):
@@ -369,9 +385,10 @@ def _number_problems(a: Args) raises -> String:
         if rule.byte_length() > 0:
             return "flag --" + flag + " " + rule + ", got " + raw
     if _given(a, "device"):
-        var device = a.get("device")
-        if device != "cpu" and device != "gpu":
-            return "flag --device must be cpu or gpu, got '" + device + "'"
+        try:
+            check_device(a.get("device"))
+        except e:
+            return String(e)
     if _given(a, "path"):
         var kind = a.get("path")
         if kind != "unified" and kind != "cached":
@@ -446,6 +463,21 @@ def check_args(a: Args, spec: CommandSpec) raises -> String:
                 "missing required flag --"
                 + name
                 + " for '"
+                + a.command
+                + "'\n"
+                + usage_for(a.command)
+            )
+    if a.command == "run" or a.command == "tokenize":
+        if a.has("prompt") and a.has("prompt-file"):
+            return (
+                "--prompt and --prompt-file cannot be combined for '"
+                + a.command
+                + "'"
+                + see
+            )
+        if not a.has("prompt") and not a.has("prompt-file"):
+            return (
+                "missing required flag --prompt for '"
                 + a.command
                 + "'\n"
                 + usage_for(a.command)
@@ -606,7 +638,34 @@ def encode_prompt(
     return tok.encode(chat_prompt(arch, text))
 
 
-def cmd_tokenize(a: Args) raises:
+def prompt_path(a: Args) raises -> String:
+    var path = a.get("prompt-file")
+    return "/dev/stdin" if path == "-" else path
+
+
+def read_prompt_file(a: Args) raises -> String:
+    var path = prompt_path(a)
+    try:
+        with open(path, "r") as f:
+            var text = f.read()
+            if text.endswith("\r\n"):
+                return String(text[byte = : text.byte_length() - 2])
+            if text.endswith("\n"):
+                return String(text[byte = : text.byte_length() - 1])
+            return text
+    except e:
+        raise Error(
+            "cannot read prompt file " + a.get("prompt-file") + ": " + String(e)
+        )
+
+
+def resolve_prompt(mut a: Args) raises:
+    if a.has("prompt-file"):
+        a.values["prompt"] = read_prompt_file(a)
+
+
+def cmd_tokenize(mut a: Args) raises:
+    resolve_prompt(a)
     var g = GGUFFile(a.get("model"))
     var tok = Tokenizer(g)
     var ids = encode_prompt(tok, g.architecture(), a)
@@ -659,6 +718,10 @@ def sampler_json(arch: String, cfg: GenConfig) -> String:
 def check_arch_flags(a: Args, arch: String) raises:
     """Refuse a flag the model's architecture ignores: a run that quietly
     takes another number of steps than asked for is a wrong answer."""
+    if a.has("eps") and arch != "dream":
+        if arch == "llada":
+            raise Error("--eps applies to Dream; LLaDA uses --block-length")
+        raise Error("--eps applies to Dream, not " + arch)
     if arch == "diffusion-gemma":
         if a.has("steps"):
             raise Error(
@@ -768,6 +831,7 @@ def gen_config(a: Args) raises -> GenConfig:
     cfg.temperature = a.float_or("temperature", 0.0)
     cfg.remasking = a.get_or("remasking", "low_confidence")
     cfg.threshold = a.float_or("threshold", 0.0)
+    cfg.eps = a.float_or("eps", 1e-3)
     cfg.full_logits = a.has("full-logits")
     cfg.dual_cache = a.has("dual-cache")
     cfg.suppress_mask = not a.has("no-suppress-mask")
@@ -1203,6 +1267,7 @@ def cmd_logits(a: Args) raises:
     var tokens = parse_csv_ints(a.get("tokens"))
     var rows = parse_csv_ints(a.get("rows"))
     var device = a.get_or("device", "cpu")
+    check_device(device)
     var arch = GGUFFile(a.get("model")).architecture()
     if arch == GEMMA_ARCH:
         if device != "cpu":
@@ -1226,13 +1291,11 @@ def cmd_logits(a: Args) raises:
     elif device == "gpu":
         var gm = GpuDiffusionLM(a.get("model"), max_tokens=len(tokens))
         _logits(gm, tokens, rows, a.get("out"))
-    elif device == "cpu":
+    else:
         var cm = DiffusionLM(
             a.get("model"), threads=threads, max_tokens=len(tokens)
         )
         _logits(cm, tokens, rows, a.get("out"))
-    else:
-        raise Error("unknown device: " + device + " (expected cpu or gpu)")
 
 
 def gemma_only_flags(a: Args) raises -> String:
@@ -1347,10 +1410,10 @@ def _logits_gemma(
     var first = len(tokens) - c.canvas
     if first < 0:
         raise Error(
-            "the token count "
-            + String(len(tokens))
-            + " is below the canvas length "
+            "--tokens needs at least "
             + String(c.canvas)
+            + " tokens, got "
+            + String(len(tokens))
         )
     var expected = String("")
     for i in range(c.canvas):
@@ -1509,12 +1572,18 @@ def decide(raw: List[String]) raises -> Decision:
     return Decision.run()
 
 
-def execute(raw: List[String]) -> Int:
-    """Runs the command line and returns the exit status: 0, 1 or 2."""
+def execute(raw: List[String], from_env: List[String] = List[String]()) -> Int:
+    """Runs the command line and returns the exit status: 0, 1 or 2.
+
+    `from_env` names the flags whose values the environment supplied (empty
+    by default, so every existing caller and test is unchanged). Two things
+    use it: a numeric-flag problem names the variable behind the bad value,
+    and `run --verbose` reports each environment-supplied flag on stderr.
+    """
     try:
         var d = decide(raw)
         if d.is_error():
-            print("ERROR:", d.text, file=stderr)
+            print("ERROR:", env_problem(d.text, from_env), file=stderr)
             return d.code()
         if not d.proceeds():
             print(d.text)
@@ -1523,6 +1592,19 @@ def execute(raw: List[String]) -> Int:
         var spec = command_spec(command)
         var a = Args(raw, spec.values, spec.booleans)
         if command == "run":
+            if a.has("verbose") and len(from_env) > 0:
+                for name in from_env:
+                    print(
+                        "from environment: --"
+                        + name
+                        + " "
+                        + getenv(env_name(name))
+                        + " ("
+                        + env_name(name)
+                        + ")",
+                        file=stderr,
+                    )
+            resolve_prompt(a)
             cmd_run(a)
         elif command == "tokenize":
             cmd_tokenize(a)
@@ -1536,10 +1618,25 @@ def execute(raw: List[String]) -> Int:
         return 1
 
 
-def main():
+def _run_env(raw: List[String]) raises -> Tuple[List[String], List[String]]:
+    """The `run` argv with `MOJO_DLLM_*` variables filled in, and their names.
+    """
+    var spec = command_spec("run")
+    var env = Dict[String, String]()
+    for f in env_flags():
+        env[env_name(f)] = getenv(env_name(f))
+    return with_env(raw, spec.values, spec.booleans, env)
+
+
+def main() raises:
     var raw = List[String]()
     for s in argv():
         raw.append(String(s))
-    var code = execute(raw)
+    var from_env = List[String]()
+    if len(raw) > 1 and raw[1] == "run":
+        var merged = _run_env(raw)
+        raw = merged[0].copy()
+        from_env = merged[1].copy()
+    var code = execute(raw, from_env)
     if code != 0:
         exit(code)

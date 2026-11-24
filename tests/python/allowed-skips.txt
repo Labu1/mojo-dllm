@@ -18,3 +18,8 @@ tests/python/test_check_format.py::* | root reads every file
 tests/python/test_dg_candidate.py::* | is in the `fixtures` group
 tests/python/test_dg_sensitivity.py::* | is in the `fixtures` group
 tests/python/test_dg_numeric.py::* | is in the `fixtures` group
+tests/python/test_dg_diagnostics.py::* | is in the `fixtures` group
+tests/python/test_dg_traces.py::* | is in the `fixtures` group
+tests/python/test_dg_native_diagnostics.py::* | is in the `fixtures` group
+tests/python/test_dg_native_diagnostics.py::* | set DG_REF to the pinned CPU reference executable
+tests/python/test_dg_native_diagnostics.py::* | set DG_MATMUL to the pinned CPU reference executable

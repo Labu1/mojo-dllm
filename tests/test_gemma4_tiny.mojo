@@ -12,10 +12,13 @@ Merges by rank: 0 `a b`, 1 `b c`, 2 `ab c`, 3 `▁ a`, 4 `\n \n`, 5 `a \n`,
 6 `▁ ▁`, 7 `a b` again.
 """
 
+from std.collections import Dict
 from std.testing import assert_equal, assert_true, assert_raises, TestSuite
+from std.time import perf_counter_ns
 
 from mojo_dllm.formats.gguf import GGUFFile
 from mojo_dllm.tokenizer.bpe import Tokenizer
+from mojo_dllm.tokenizer.gemma4 import end_of_generation_ids, longest_first
 
 comptime DIR = "tests/fixtures/gemma4-tiny/"
 comptime BYTE0 = 9
@@ -345,13 +348,69 @@ def test_tiny_end_of_turn_is_a_control_token_whatever_the_file_says() raises:
 
 
 def test_tiny_end_of_generation_ids_are_listed_once() raises:
-    # EOS is <turn|> itself here, so the list is [6, 8], not [6, 6, 8].
+    # EOS is <turn|> itself here, so <turn|> is listed once, not twice. <eos>
+    # still ends generation: llama.cpp adds it by its text (issue #171).
     var tok = _tok("eos-is-end-of-turn.gguf")
     assert_equal(tok.eos_id, 6)
     assert_equal(tok.eot_id, 6)
-    assert_equal(_show(tok.eog_ids()), "[6, 8]")
+    assert_equal(_show(tok.eog_ids()), "[6, 1, 8]")
     assert_true(tok.is_eog(6) and tok.is_eog(8))
-    assert_true(not tok.is_eog(1))
+    assert_true(tok.is_eog(1))
+
+
+def test_tiny_end_of_generation_follows_llama_cpps_rules() raises:
+    # <eos>, <turn|> and <|tool_response> by text, then the ids under the
+    # eos, eot and eom keys when they are set, each id once.
+    var ids = Dict[String, Int]()
+    ids["<eos>"] = 1
+    ids["<turn|>"] = 6
+    ids["<|tool_response>"] = 8
+    # No eos_token_id: <eos> ends generation by its text.
+    assert_equal(_show(end_of_generation_ids(ids, -1, -1, -1)), "[1, 6, 8]")
+    # An eos_token_id that names another token keeps <eos> as well.
+    assert_equal(_show(end_of_generation_ids(ids, 5, -1, -1)), "[5, 1, 6, 8]")
+    # The eot and eom ids are added, and not again when already listed.
+    assert_equal(
+        _show(end_of_generation_ids(ids, 1, 20, 21)), "[1, 6, 8, 20, 21]"
+    )
+    assert_equal(_show(end_of_generation_ids(ids, 1, 6, 1)), "[1, 6, 8]")
+    # A vocabulary without any of the three texts ends on the keys alone.
+    var none = Dict[String, Int]()
+    assert_equal(_show(end_of_generation_ids(none, -1, 7, -1)), "[7]")
+    assert_equal(_show(end_of_generation_ids(none, -1, -1, -1)), "[]")
+
+
+def test_tiny_special_tokens_sort_longest_first_then_by_id() raises:
+    assert_equal(_show(longest_first([3, 5, 3, 1, 5])), "[1, 4, 0, 2, 3]")
+    assert_equal(_show(longest_first([1, 2, 3, 4, 5])), "[4, 3, 2, 1, 0]")
+    assert_equal(_show(longest_first([7])), "[0]")
+    assert_equal(_show(longest_first(List[Int]())), "[]")
+
+
+def test_tiny_many_special_tokens_of_rising_length_sort_quickly() raises:
+    # A file may mark every token as control. With 200,000 texts whose length
+    # rises with the id, an insertion sort moves each past every shorter one
+    # before it, about 2e10 moves; a merge sort takes milliseconds.
+    var n = 200_000
+    var lengths = List[Int](capacity=n)
+    for i in range(n):
+        lengths.append(1 + i // 16)
+    var t0 = perf_counter_ns()
+    var order = longest_first(lengths)
+    var seconds = Float64(perf_counter_ns() - t0) / 1e9
+    assert_true(seconds < 1.0, "the sort took " + String(seconds) + " s")
+    assert_equal(len(order), n)
+    var out_of_order = 0
+    for k in range(1, n):
+        var a = order[k - 1]
+        var b = order[k]
+        if not (
+            lengths[a] > lengths[b] or (lengths[a] == lengths[b] and a < b)
+        ):
+            out_of_order += 1
+    assert_equal(out_of_order, 0)
+    assert_equal(order[0], n - 16)
+    assert_equal(order[n - 1], 15)
 
 
 def test_tiny_end_of_generation_skips_tokens_the_vocabulary_lacks() raises:

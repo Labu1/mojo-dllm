@@ -66,6 +66,14 @@ def parse_nvidia_smi(text: str) -> list[Gpu]:
     return gpus
 
 
+def read_gpus(text: str) -> tuple[list[Gpu], str | None]:
+    """The GPUs in `text`; no GPU and the first line of the parse error when `text` is unreadable."""
+    try:
+        return parse_nvidia_smi(text), None
+    except LauncherError as e:
+        return [], str(e).splitlines()[0]
+
+
 def pin(gpu: Gpu) -> dict[str, str]:
     """Make the binary's CUDA default device the card that was chosen.
 
