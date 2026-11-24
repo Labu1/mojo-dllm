@@ -8,6 +8,9 @@ semantic versioning (0.y: minor bumps may break things).
 
 ### Added
 
+- A `scorecard` workflow runs the OpenSSF Scorecard weekly, on pushes to main and when branch protection changes, and
+  publishes the result, so the Scorecard API and a README badge have data. It reports and never gates, and it uploads
+  no SARIF.
 - `mojo-dllm --version` prints a second line, `commit: <id>`, with the 12-character short id of the commit the binary was
   built from (issue #113, pull request #167). `-dirty` follows the id when `git status` reports changes under `src/` at
   build time, and `unknown` stands in for a build without Git metadata or one that did not go through `scripts/build.sh`.
@@ -20,6 +23,10 @@ semantic versioning (0.y: minor bumps may break things).
   Python reference: each masked position commits independently with probability `1 - s/t`, forced to 1 at the final
   step. `random` follows llama.cpp: a uniform random confidence per candidate, then the scheduled top-k. Both use
   `--seed`; the default stays `entropy`. `--no-suppress-mask` allows the mask token as a sampled answer again.
+- `run` and `tokenize` take `--prompt-file PATH` in place of `--prompt` (issue #104, pull request #157). `-` reads standard
+  input, one trailing newline is removed, and a file that cannot be read exits 1 before the model is mapped. Both flags, or
+  neither, exit 2. Tests now reach the flag through `execute` for each command: the unit tests called `resolve_prompt`
+  directly, so deleting either call in `main.mojo` passed all of them.
 
 ### Changed
 
@@ -37,7 +44,10 @@ semantic versioning (0.y: minor bumps may break things).
 - The action-pin check fails when the TruffleHog `version` input in `secret-scan.yml` is not the release its pin comment
   names without the `v` (issue #146): a Dependabot bump moves the pin and leaves the scanner image tag behind. The
   workflow comments now say what runs: a push to main and the weekly run pass no base, so each scans the full history
-  that leads to the commit, not the working tree.
+  that leads to the commit, not the working tree. The check also refuses a TruffleHog step with no `version` input, whose
+  default is `latest`, and it reads the steps of composite actions under `.github/actions` as well as those of workflows.
+- `./mojo-dllm doctor` refuses any argument with exit 2 and runs no probe (issue #80, pull request #288): `doctor --jsno`
+  used to print the normal report and exit 0. `doctor -h` and `doctor --help` still print the help.
 - `--remasking origin` was refused before the model loaded: the accepted names listed five values and left out `origin`.
   `docs/cli.md` now says Dream takes all six names and LLaDA refuses `entropy`, `maskgit_plus`, `topk_margin` and `origin`.
 - `./mojo-dllm run` with the default `--device auto` no longer stops when `nvidia-smi` prints a line the launcher cannot

@@ -1,0 +1,39 @@
+---
+name: scorecard
+
+# OpenSSF Scorecard grades the repository against about 18 supply-chain checks
+# (branch protection, pinned dependencies, token permissions, CI tests and more)
+# and publishes the result, so the README badge and the public Scorecard API have
+# data. It reports and never gates. There is no SARIF upload: it would turn every
+# heuristic into a code-scanning alert, most of them with no file attached.
+
+on:
+  branch_protection_rule:
+  schedule:
+    - cron: '20 7 * * 1'  # weekly
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  analysis:
+    # Publishing results needs a public repository, so a private copy skips the job.
+    if: github.event.repository.visibility == 'public'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      id-token: write  # OIDC, required by publish_results
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Run analysis
+        uses: ossf/scorecard-action@fa7117db83c52d787ae5a89f350999701505d78e  # v2.5.0
+        with:
+          results_file: results.sarif
+          results_format: sarif
+          publish_results: true
