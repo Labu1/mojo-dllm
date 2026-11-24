@@ -6,7 +6,7 @@ test_dg_selfcond 9
 test_diffusion 60
 test_diffusion_gemma 41
 test_entropy_bound 40
-test_gemma4_tiny 37
+test_gemma4_tiny 40
 test_gguf 9
 test_gguf_malformed 60
 test_golden 18
