@@ -373,9 +373,10 @@ def _number_problems(a: Args) raises -> String:
         if rule.byte_length() > 0:
             return "flag --" + flag + " " + rule + ", got " + raw
     if _given(a, "device"):
-        var device = a.get("device")
-        if device != "cpu" and device != "gpu":
-            return "flag --device must be cpu or gpu, got '" + device + "'"
+        try:
+            check_device(a.get("device"))
+        except e:
+            return String(e)
     if _given(a, "path"):
         var kind = a.get("path")
         if kind != "unified" and kind != "cached":
@@ -1249,6 +1250,7 @@ def cmd_logits(a: Args) raises:
     var tokens = parse_csv_ints(a.get("tokens"))
     var rows = parse_csv_ints(a.get("rows"))
     var device = a.get_or("device", "cpu")
+    check_device(device)
     var arch = GGUFFile(a.get("model")).architecture()
     if arch == GEMMA_ARCH:
         if device != "cpu":
@@ -1272,13 +1274,11 @@ def cmd_logits(a: Args) raises:
     elif device == "gpu":
         var gm = GpuDiffusionLM(a.get("model"), max_tokens=len(tokens))
         _logits(gm, tokens, rows, a.get("out"))
-    elif device == "cpu":
+    else:
         var cm = DiffusionLM(
             a.get("model"), threads=threads, max_tokens=len(tokens)
         )
         _logits(cm, tokens, rows, a.get("out"))
-    else:
-        raise Error("unknown device: " + device + " (expected cpu or gpu)")
 
 
 def gemma_only_flags(a: Args) raises -> String:
@@ -1393,10 +1393,10 @@ def _logits_gemma(
     var first = len(tokens) - c.canvas
     if first < 0:
         raise Error(
-            "the token count "
-            + String(len(tokens))
-            + " is below the canvas length "
+            "--tokens needs at least "
             + String(c.canvas)
+            + " tokens, got "
+            + String(len(tokens))
         )
     var expected = String("")
     for i in range(c.canvas):
