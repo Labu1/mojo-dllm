@@ -891,6 +891,13 @@ def test_eps_belongs_to_dream_and_is_loaded_into_the_config() raises:
         check_arch_flags(eps, "diffusion-gemma")
     assert_equal(gen_config(eps).eps, 0.5)
     assert_equal(gen_config(_arch_run_args([])).eps, 1e-3)
+    # The documented range is at least 0 and below 1: both edges that are inside it pass the check.
+    assert_equal(
+        _check("run", ["--model", "m", "--prompt", "p", "--eps", "0"]), ""
+    )
+    assert_equal(
+        _check("run", ["--model", "m", "--prompt", "p", "--eps", "0.999"]), ""
+    )
 
 
 def test_json_reports_steps_taken_and_the_stop_reason() raises:

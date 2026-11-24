@@ -32,6 +32,14 @@ semantic versioning (0.y: minor bumps may break things).
   input, one trailing newline is removed, and a file that cannot be read exits 1 before the model is mapped. Both flags, or
   neither, exit 2. Tests now reach the flag through `execute` for each command: the unit tests called `resolve_prompt`
   directly, so deleting either call in `main.mojo` passed all of them.
+- `run` reads a default for ten value flags from `MOJO_DLLM_*` variables (issue #122, pull request #191): `MODEL`,
+  `MAX_TOKENS`, `STEPS`, `BLOCK_LENGTH`, `SEED`, `TEMPERATURE`, `THREADS`, `DEVICE`, `REMASKING` and `THRESHOLD`. A flag on
+  the command line wins, an empty variable counts as unset, `--verbose` reports each value that came from a variable on
+  stderr, and a bad numeric value names its variable. `scripts/check_env.sh` drives the real binary through those rules
+  (CI and `ci-local.sh` run it), and `docs/cli.md` says which scripts need the variables unset.
+- Dream takes `--eps F`, the final timestep of its schedule (issue #30, pull request #283): 0.001 by default, at least 0
+  and below 1. LLaDA and DiffusionGemma refuse it. The schedule lives in `dream_transfer_probability` and
+  `dream_n_transfer`, so `origin` remasking and the top-k paths both follow it.
 
 ### Changed
 
@@ -52,6 +60,10 @@ semantic versioning (0.y: minor bumps may break things).
 
 ### Fixed
 
+- DiffusionGemma refuses an untied `output.weight` and the seven per-block projection scales (`attn_q`, `attn_k`, `attn_v`,
+  `attn_output`, `ffn_gate`, `ffn_up`, `ffn_down`) by name (issue #170, pull request #293). llama.cpp applies them and this
+  loader ignores them, so such a file used to answer with wrong logits. `logits` now says how many tokens `--tokens` must
+  hold, and an unknown `--device` gets the same message in option validation and in dispatch.
 - The gemma4 tokenizer ends generation on the set llama.cpp builds (issue #171): `<eos>`, `<turn|>` and
   `<|tool_response>` by their text, plus the ids under `tokenizer.ggml.eos_token_id`, `eot_token_id` and `eom_token_id`,
   each once. A file whose `eos_token_id` is missing or names another token now stops at `<eos>` too. The special tokens
