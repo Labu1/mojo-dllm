@@ -1430,7 +1430,7 @@ def test_logits_refuses_rows_that_are_not_the_canvas() raises:
         all_rows.append(r)
     with assert_raises(contains="--rows must be 9,10"):
         _logits_gemma(DG_TINY, 1, tokens, all_rows, path)
-    with assert_raises(contains="below the canvas length 16"):
+    with assert_raises(contains="--tokens needs at least 16 tokens, got 15"):
         _logits_gemma(DG_TINY, 1, _gemma_tokens(15), List[Int](), path)
 
 
@@ -1546,7 +1546,7 @@ def test_run_option_values_are_checked_before_the_model_loads() raises:
     wants.append("flag --threshold needs a finite number, got 'inf'")
     wants.append("flag --threshold must be between 0 and 1, got -1")
     wants.append("flag --threshold must be between 0 and 1, got 1.5")
-    wants.append("flag --device must be cpu or gpu, got 'foo'")
+    wants.append("unknown device: foo (expected cpu or gpu)")
     wants.append(
         "flag --remasking must be one of low_confidence, random, entropy,"
         " maskgit_plus, topk_margin, origin, got 'foo'"
@@ -1756,7 +1756,7 @@ def test_logits_option_values_are_checked_before_the_model_loads() raises:
     var device = base.copy()
     device.append("--device")
     device.append("tpu")
-    _same("logits", device, "flag --device must be cpu or gpu, got 'tpu'")
+    _same("logits", device, "unknown device: tpu (expected cpu or gpu)")
 
 
 def test_a_bad_option_exits_two_without_opening_the_model() raises:
@@ -1787,7 +1787,7 @@ def test_logits_checks_rows_and_prev_before_the_weights_load() raises:
             bad, 1, _gemma_tokens(25), _rows(9), path, "unified", short, 1.25
         )
     remove(short)
-    with assert_raises(contains="below the canvas length 16"):
+    with assert_raises(contains="--tokens needs at least 16 tokens, got 15"):
         _logits_gemma(bad, 1, _gemma_tokens(15), List[Int](), path)
 
 
@@ -2350,6 +2350,13 @@ def test_logits_refuses_an_unknown_device() raises:
     )
     with assert_raises(contains="unknown device: tpu (expected cpu or gpu)"):
         cmd_logits(a)
+    var gemma = Args(
+        _logits_args("0", "build/never-written.f32", "tpu"),
+        spec.values,
+        spec.booleans,
+    )
+    with assert_raises(contains="unknown device: tpu (expected cpu or gpu)"):
+        cmd_logits(gemma)
     assert_true(not exists("build/never-written.f32"))
 
 
