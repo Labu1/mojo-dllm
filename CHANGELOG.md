@@ -8,6 +8,9 @@ semantic versioning (0.y: minor bumps may break things).
 
 ### Added
 
+- A `scorecard` workflow runs the OpenSSF Scorecard weekly, on pushes to main and when branch protection changes, and
+  publishes the result, so the Scorecard API and a README badge have data. It reports and never gates, and it uploads
+  no SARIF.
 - `mojo-dllm --version` prints a second line, `commit: <id>`, with the 12-character short id of the commit the binary was
   built from (issue #113, pull request #167). `-dirty` follows the id when `git status` reports changes under `src/` at
   build time, and `unknown` stands in for a build without Git metadata or one that did not go through `scripts/build.sh`.
