@@ -50,6 +50,10 @@ semantic versioning (0.y: minor bumps may break things).
   used to print the normal report and exit 0. `doctor -h` and `doctor --help` still print the help.
 - `--remasking origin` was refused before the model loaded: the accepted names listed five values and left out `origin`.
   `docs/cli.md` now says Dream takes all six names and LLaDA refuses `entropy`, `maskgit_plus`, `topk_margin` and `origin`.
+- `./mojo-dllm run` with the default `--device auto` no longer stops when `nvidia-smi` prints a line the launcher cannot
+  read (issue #81): like a missing, failing or timed-out `nvidia-smi`, it runs on the CPU and prints
+  `device: cpu (nvidia-smi failed: nvidia-smi printed a line the launcher cannot read: '...')`. `doctor` and `setup`
+  already went on with the CPU.
 
 ## [0.2.0] - 2026-11-10
 
