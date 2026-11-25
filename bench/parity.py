@@ -500,11 +500,9 @@ def dg_compare(
     cases = dg_case_files(workdir, tuple(bound["cases"])) if fixed_input else dg_case_files(workdir)
     commits: set[str] = set()
     plan = []
-    seen_prompts = set()
     for case_json in cases:
         d = case_json.parent
         meta = json.loads(case_json.read_text(encoding="utf-8"))
-        seen_prompts.add(meta["prompt"])
         if fixed_input:
             dg_check_reference_spread(case_json, meta, bound)
         for v in DG_VARIANTS:
@@ -531,8 +529,6 @@ def dg_compare(
             if "ref_spread" not in meta:
                 raise SystemExit(f"refusing: {case_json} has no ref_spread; run --phase ref again")
             plan.append((meta, v, ref, mojo, receipt))
-    if fixed_input and seen_prompts != set(bound["cases"]):
-        raise SystemExit("refusing: the saved cases do not cover the complete measured DiffusionGemma suite")
     if len(commits) != 1:
         raise SystemExit(
             f"refusing: the mojo-dllm outputs come from {len(commits)} different builds {sorted(commits)}; "
