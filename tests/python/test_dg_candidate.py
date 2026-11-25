@@ -75,6 +75,20 @@ def runtime_command(*, sc: bool = False, code: str = "") -> list[str]:
     return command
 
 
+def test_candidate_passes_canvas_positions_to_logits_argv(tmp_path: Path) -> None:
+    case, model, meta = fixture(tmp_path)
+    meta.update(prompt_tokens=[11, 12, 13], canvas_tokens=[99, 99], canvas_length=2)
+    (case / "case.json").write_text(json.dumps(meta))
+    program = (
+        "import pathlib,sys; "
+        "assert sys.argv[1:5] == ['--tokens', '11,12,13,99,99', '--rows', '3,4']; "
+        "pathlib.Path(sys.argv[5]).write_bytes(bytes(16))"
+    )
+    command = [sys.executable, "-c", program, "--tokens", "{prompt_csv},{canvas_csv}",
+               "--rows", "{rows_csv}", "{out}", "{model}", "{variant}"]
+    candidate.export_candidate(case, model, "unified", command, candidate_revision="fixture")
+
+
 @pytest.mark.parametrize("changed", ["path", "size", "mtime"])
 def test_candidate_model_must_match_reference_source(tmp_path: Path, changed: str) -> None:
     case, model, meta = fixture(tmp_path)

@@ -320,7 +320,15 @@ scripts/build_dg_ref.sh
 uv run --only-group fixtures python bench/parity.py --arch diffusion-gemma --phase ref \
     --model models/diffusiongemma-26B-A4B-it-Q4_K_M.gguf --llama-src "$DG_LLAMA_SRC" \
     --model-provenance model-provenance.json
-# Export each candidate through bench/dg_candidate.py (the runtime forward pass is #64).
+# Export each candidate before comparing. For example, for case0 without self-conditioning:
+model=models/diffusiongemma-26B-A4B-it-Q4_K_M.gguf
+case_dir=build/dg-parity/diffusiongemma-26B-A4B-it-Q4_K_M/case0
+revision=$(build/mojo-dllm --version | sed -n 's/^commit: //p')
+uv run --only-group fixtures python bench/dg_candidate.py "$case_dir" --model "$model" \
+    --variant unified --candidate-revision "$revision" -- \
+    build/mojo-dllm logits --model '{model}' --path '{variant}' \
+    --tokens '{prompt_csv},{canvas_csv}' --rows '{rows_csv}' --out '{out}'
+
 uv run --only-group fixtures python bench/parity.py --arch diffusion-gemma --phase compare \
     --model models/diffusiongemma-26B-A4B-it-Q4_K_M.gguf
 ```

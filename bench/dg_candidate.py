@@ -6,6 +6,7 @@
 
 The command is an argv template, executed without a shell. It must consume the
 case JSON (or both {prompt_csv} and {canvas_csv}), {variant}, {model}, and {out}.
+The optional {rows_csv} lists the zero-based canvas positions after the prompt.
 Self-conditioned variants also require {prev} and {prev_temp_inv}. The runtime
 forward pass is supplied by the caller; this wrapper records its real execution.
 """
@@ -45,9 +46,11 @@ def export_candidate(case_dir: pathlib.Path, model: pathlib.Path, variant: str, 
     if output.exists() or receipt.exists():
         raise SystemExit(f"refusing: {output} or its receipt already exists")
     inputs = parity.dg_receipt_inputs(case_dir, meta, variant)
+    first_row = len(meta["prompt_tokens"])
     values = dict(model=str(model), out=str(output), variant=variant, case_json=str(case_dir / "case.json"),
                   prompt_csv=",".join(map(str, meta["prompt_tokens"])),
                   canvas_csv=",".join(map(str, meta["canvas_tokens"])),
+                  rows_csv=",".join(map(str, range(first_row, first_row + meta["canvas_length"]))),
                   prev=str(case_dir / parity.DG_PREV_FILE), prev_temp_inv=str(meta["prev_temp_inv"]))
     argv = [part.format_map(values) for part in template]
     executable = shutil.which(argv[0])
