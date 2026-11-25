@@ -122,6 +122,18 @@ def test_documented_spread_is_rendered_from_the_measurement_record() -> None:
     assert section == check_dg_bound.render_sensitivity(evidence)
 
 
+def test_sensitivity_source_repeats_the_reference_source_record() -> None:
+    # The calibration carries a copy of the source record so it stands alone; the copy must not drift.
+    evidence = json.loads((ROOT / sensitivity.parity.DG_SENSITIVITY_EVIDENCE).read_text(encoding="utf-8"))
+    source = json.loads((ROOT / "bench/checks/2026-11-05-dg-reference-source.json").read_text(encoding="utf-8"))
+    copy = evidence["source"]
+    for key in ("commit", "mechanism", "manifest"):
+        assert copy[key] == source[key], key
+    full = source["compilation_input_verification"]
+    for key, value in copy["compilation_input_verification"].items():
+        assert value == full[key], f"compilation_input_verification.{key}"
+
+
 def test_sensitivity_table_includes_the_reverse_direction_in_each_bound() -> None:
     import check_dg_bound
 
