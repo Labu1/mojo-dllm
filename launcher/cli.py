@@ -47,6 +47,7 @@ def help_text(style: Style) -> str:
         '  run "PROMPT" [-m MODEL] [--device auto|cpu|gpu] [--offline] [binary flags]',
         "",
         '  A prompt that starts with - goes after --: ./mojo-dllm run -- "-5 plus 3?"',
+        '  A long prompt can come from a file: ./mojo-dllm run --prompt-file PATH ("-" reads stdin)',
         "  MODEL is a path to a .gguf file, the alias llada-8b, or owner/repo[:QUANT].",
         "  Binary flags include --max-tokens, --steps, --block-length, --seed,",
         "  --temperature, --threads and --verbose.",

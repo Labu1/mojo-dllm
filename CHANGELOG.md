@@ -8,6 +8,9 @@ semantic versioning (0.y: minor bumps may break things).
 
 ### Added
 
+- `./mojo-dllm run --prompt-file PATH` passes the prompt file to the binary (issue #125); `-` reads standard input. A
+  prompt word together with `--prompt-file` is a usage error, and a missing file or a directory stops the launcher
+  before it builds the binary or downloads a model.
 - `mojo-dllm --version` prints a second line, `commit: <id>`, with the 12-character short id of the commit the binary was
   built from (issue #113, pull request #167). `-dirty` follows the id when `git status` reports changes under `src/` at
   build time, and `unknown` stands in for a build without Git metadata or one that did not go through `scripts/build.sh`.

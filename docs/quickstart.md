@@ -49,7 +49,8 @@ missing GPU it says that the CPU will be used.
 ./mojo-dllm run "Write a haiku about rain." --max-tokens 64 --steps 32 --verbose
 ```
 
-The prompt is the first word that is not a flag; quote it. `run` rebuilds the
+The prompt is the first word that is not a flag; quote it. `--prompt-file PATH`
+reads it from a file, and `--prompt-file -` reads standard input. `run` rebuilds the
 binary if a source file, `pyproject.toml`, `uv.lock` or `scripts/build.sh` changed, or if the
 Mojo pin or the GPU architecture (`MOJO_DLLM_GPU_ARCH`, else the local GPU) differs from the one
 recorded in `build/mojo-dllm.stamp`, finds the model, picks the device and hands

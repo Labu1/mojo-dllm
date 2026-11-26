@@ -27,15 +27,17 @@ EXAMPLE = './mojo-dllm run "Explain speculative decoding in two sentences."'
 
 @dataclass(frozen=True)
 class RunArgs:
-    prompt: str
+    prompt: str | None
     model: str
     device: str
     offline: bool
     passthrough: list[str]
+    prompt_file: str | None = None
 
 
 def parse_run_args(argv: list[str]) -> RunArgs:
     prompt: str | None = None
+    prompt_file: str | None = None
     model, device, offline = DEFAULT_MODEL, "auto", False
     passthrough: list[str] = []
     options_done = False
@@ -69,6 +71,8 @@ def parse_run_args(argv: list[str]) -> RunArgs:
                     model = value
                 elif arg == "--device":
                     device = value
+                elif arg == "--prompt-file":
+                    prompt_file = value
                 else:
                     passthrough += [arg, value]
         elif prompt is None:
@@ -78,16 +82,33 @@ def parse_run_args(argv: list[str]) -> RunArgs:
         i += 1
     if device not in ("auto", "cpu", "gpu"):
         raise UsageError(f"--device must be auto, cpu or gpu, not {device!r}")
-    if prompt is None:
-        raise UsageError(f"run needs a prompt. Example: {EXAMPLE}")
-    return RunArgs(prompt, model, device, offline, passthrough)
+    if prompt is not None and prompt_file is not None:
+        raise UsageError(f"--prompt-file and a prompt word cannot be combined. Example: {EXAMPLE}")
+    if prompt is None and prompt_file is None:
+        raise UsageError(f"run needs a prompt or --prompt-file PATH. Example: {EXAMPLE}")
+    return RunArgs(prompt, model, device, offline, passthrough, prompt_file)
 
 
 def run_argv(binary: Path, model: Path, args: RunArgs, device: str) -> list[str]:
+    # The path goes to the binary as given: it runs in the caller's directory.
+    source = ["--prompt-file", args.prompt_file] if args.prompt_file is not None else ["--prompt", args.prompt]
     return [
-        str(binary), "run", "--model", str(model), "--prompt", args.prompt,
+        str(binary), "run", "--model", str(model), *source,
         "--device", device, *args.passthrough,
     ]
+
+
+def check_prompt_file(path: str | None) -> None:
+    """Fail before a build or a download when the prompt file cannot be there.
+
+    exists() and is_dir() rather than is_file(): /dev/stdin and <(cmd) are not
+    regular files, and the binary opens them itself.
+    """
+    if path is None or path == "-":
+        return
+    p = Path(path)
+    if not p.exists() or p.is_dir():
+        raise LauncherError(f"cannot read prompt file {path}: no such file, or it is a directory")
 
 
 def detect_gpus() -> tuple[list[Gpu], str | None]:
@@ -122,6 +143,7 @@ def _gpus_for(device: str) -> tuple[list[Gpu], str | None]:
 
 def cmd_run(argv: list[str]) -> int:
     args = parse_run_args(argv)
+    check_prompt_file(args.prompt_file)
     ensure_built()
     hub = Hub(offline=offline_requested(args.offline, os.environ))
     # Progress and status go to stderr so stdout stays the model's text.

@@ -108,6 +108,74 @@ def test_prompt_as_a_flag_is_refused() -> None:
         parse_run_args(["--prompt", "hi"])
 
 
+def test_prompt_file_is_extracted() -> None:
+    a = parse_run_args(["--prompt-file", "f.txt", "-m", "a/b"])
+    assert (a.prompt, a.prompt_file, a.model, a.passthrough) == (None, "f.txt", "a/b", [])
+
+
+def test_a_repeated_prompt_file_keeps_the_last_one() -> None:
+    assert parse_run_args(["--prompt-file", "a.txt", "--prompt-file", "b.txt"]).prompt_file == "b.txt"
+
+
+def test_a_prompt_word_and_a_prompt_file_cannot_be_combined() -> None:
+    with pytest.raises(UsageError, match="cannot be combined"):
+        parse_run_args(["hi", "--prompt-file", "f.txt"])
+    with pytest.raises(UsageError, match="cannot be combined"):
+        parse_run_args(["--prompt-file", "f.txt", "--", "hi"])
+
+
+@pytest.mark.parametrize("argv", [[], ["--max-tokens", "64"]])
+def test_no_prompt_and_no_prompt_file_names_both(argv: list[str]) -> None:
+    with pytest.raises(UsageError) as e:
+        parse_run_args(argv)
+    assert "run needs a prompt or --prompt-file PATH" in str(e.value) and runcmd.EXAMPLE in str(e.value)
+
+
+def test_argv_for_the_binary_with_a_prompt_file() -> None:
+    a = parse_run_args(["--prompt-file", "f.txt"])
+    assert run_argv(Path("/r/build/mojo-dllm"), Path("/m/x.gguf"), a, "cpu") == [
+        "/r/build/mojo-dllm", "run", "--model", "/m/x.gguf", "--prompt-file", "f.txt", "--device", "cpu",
+    ]
+
+
+def _fail_before_the_file_check(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(runcmd, "ensure_built", lambda: pytest.fail("ran before the file check"))
+    monkeypatch.setattr(runcmd, "ensure_model", lambda *a, **k: pytest.fail("ran before the file check"))
+
+
+def test_a_missing_prompt_file_stops_run_before_the_build(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    _fail_before_the_file_check(monkeypatch)
+    absent = tmp_path / "absent.txt"
+    with pytest.raises(LauncherError) as e:
+        runcmd.cmd_run(["--prompt-file", str(absent)])
+    assert not isinstance(e.value, UsageError) and f"cannot read prompt file {absent}" in str(e.value)
+
+
+def test_a_directory_as_the_prompt_file_stops_run_before_the_build(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _fail_before_the_file_check(monkeypatch)
+    with pytest.raises(LauncherError, match="it is a directory") as e:
+        runcmd.cmd_run(["--prompt-file", str(tmp_path)])
+    assert str(tmp_path) in str(e.value)
+
+
+def test_a_readable_prompt_file_reaches_the_build(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    def built() -> bool:
+        raise RuntimeError("built")
+
+    monkeypatch.setattr(runcmd, "ensure_built", built)
+    prompt = tmp_path / "p.txt"
+    prompt.write_text("Explain diffusion.\n")
+    paths = [str(prompt), "-"]
+    # /dev/stdin is not a regular file (nor is <(cmd)): the check must not use is_file().
+    if Path("/dev/stdin").exists():
+        paths.append("/dev/stdin")
+    for path in paths:
+        with pytest.raises(RuntimeError, match="built"):
+            runcmd.cmd_run(["--prompt-file", path])
+
+
 def test_run_argument_mistakes_are_usage_errors() -> None:
     for argv in (["hi", "--steps"], ["a", "b"], ["hi", "--device", "tpu"], []):
         with pytest.raises(UsageError):
