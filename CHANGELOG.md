@@ -20,8 +20,6 @@ semantic versioning (0.y: minor bumps may break things).
   Python reference: each masked position commits independently with probability `1 - s/t`, forced to 1 at the final
   step. `random` follows llama.cpp: a uniform random confidence per candidate, then the scheduled top-k. Both use
   `--seed`; the default stays `entropy`. `--no-suppress-mask` allows the mask token as a sampled answer again.
-- `./mojo-dllm doctor --json` prints the eight checks as one line of JSON (`schema`, `ok` and `checks`, each with `id`,
-  `status`, `detail` and `fix`) and exits with the same status as the text report (issue #116).
 
 ### Changed
 
