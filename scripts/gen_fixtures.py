@@ -933,6 +933,12 @@ def diffusion_gemma() -> None:
 
     # Tensor directory checks. Each file differs from the passing control in one tensor.
     write_gemma(out / "thin-valid.gguf")
+    head = ((GEMMA["hidden"], GEMMA["vocab"]), "Q6_K")
+    write_gemma(out / "unsupported-output.weight.gguf", add={"output.weight": head})
+    for projection in ("attn_q", "attn_k", "attn_v", "attn_output", "ffn_gate", "ffn_up", "ffn_down"):
+        layer = 0 if projection == "attn_v" else 1  # Only the sliding layer has a V projection.
+        name = f"blk.{layer}.{projection}.scale"
+        write_gemma(out / f"unsupported-{name}.gguf", add={name: ((1,), "F32")})
     # Every positive value at its smallest, and the optional keys absent: they must still pass.
     ones = {**GEMMA, "layers": 1, "sliding": [True], "kv": [1], "heads": 1, "key_swa": 1, "key": 1, "window": 1,
             "experts": 1, "used": 1, "expert_ffn": 1, "canvas": 1}

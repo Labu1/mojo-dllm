@@ -10,8 +10,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from launcher.build import BINARY, ensure_built, exec_binary
-from launcher.errors import LauncherError, UsageError
-from launcher.gpu import QUERY, Gpu, choose_device, parse_nvidia_smi
+from launcher.errors import UsageError
+from launcher.gpu import QUERY, Gpu, choose_device, read_gpus
 from launcher.hub import Hub, offline_requested
 from launcher.models import DEFAULT_MODEL, ensure_model, ensure_model_status
 from launcher.verified import default_store
@@ -91,7 +91,7 @@ def run_argv(binary: Path, model: Path, args: RunArgs, device: str) -> list[str]
 
 
 def detect_gpus() -> tuple[list[Gpu], str | None]:
-    """The GPUs nvidia-smi lists, and why it could not say (None when it ran)."""
+    """The GPUs nvidia-smi lists, and why it could not say (None when it ran and its listing was readable)."""
     if shutil.which("nvidia-smi") is None:
         return [], None
     try:
@@ -106,18 +106,14 @@ def detect_gpus() -> tuple[list[Gpu], str | None]:
     if done.returncode != 0:
         detail = done.stderr.strip().splitlines()
         return [], f"exit {done.returncode}: {detail[0]}" if detail else f"exit {done.returncode}"
-    return parse_nvidia_smi(done.stdout), None
+    # An unreadable listing is no usable GPU, like the failures above: auto uses the CPU, gpu warns.
+    return read_gpus(done.stdout)
 
 
 def _gpus_for(device: str) -> tuple[list[Gpu], str | None]:
     if device == "cpu":
         return [], None
-    if device == "auto":
-        return detect_gpus()
-    try:  # an explicit gpu is checked, and an unreadable listing is a warning, not a refusal
-        return detect_gpus()
-    except LauncherError as e:
-        return [], str(e).splitlines()[0]
+    return detect_gpus()
 
 
 def cmd_run(argv: list[str]) -> int:

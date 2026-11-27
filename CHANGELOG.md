@@ -6,8 +6,13 @@ semantic versioning (0.y: minor bumps may break things).
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-24
+
 ### Added
 
+- A `scorecard` workflow runs the OpenSSF Scorecard weekly, on pushes to main and when branch protection changes, and
+  publishes the result, so the Scorecard API and a README badge have data. It reports and never gates, and it uploads
+  no SARIF.
 - `mojo-dllm --version` prints a second line, `commit: <id>`, with the 12-character short id of the commit the binary was
   built from (issue #113, pull request #167). `-dirty` follows the id when `git status` reports changes under `src/` at
   build time, and `unknown` stands in for a build without Git metadata or one that did not go through `scripts/build.sh`.
@@ -20,9 +25,32 @@ semantic versioning (0.y: minor bumps may break things).
   Python reference: each masked position commits independently with probability `1 - s/t`, forced to 1 at the final
   step. `random` follows llama.cpp: a uniform random confidence per candidate, then the scheduled top-k. Both use
   `--seed`; the default stays `entropy`. `--no-suppress-mask` allows the mask token as a sampled answer again.
+- Optional DiffusionGemma graph traces (`--trace-dir`, `--trace-only`) and
+  ordinary-buffer replay (`--no-repack`). `scripts/build_dg_ref.sh` also builds
+  `dg_matmul`. The projection, matrix, softmax and tiny-model checkers, together
+  with `compare_dg_traces.py`, record the cached/unified arithmetic differences
+  and independent forward comparisons for #163.
+- `run` and `tokenize` take `--prompt-file PATH` in place of `--prompt` (issue #104, pull request #157). `-` reads standard
+  input, one trailing newline is removed, and a file that cannot be read exits 1 before the model is mapped. Both flags, or
+  neither, exit 2. Tests now reach the flag through `execute` for each command: the unit tests called `resolve_prompt`
+  directly, so deleting either call in `main.mojo` passed all of them.
+- `run` reads a default for ten value flags from `MOJO_DLLM_*` variables (issue #122, pull request #191): `MODEL`,
+  `MAX_TOKENS`, `STEPS`, `BLOCK_LENGTH`, `SEED`, `TEMPERATURE`, `THREADS`, `DEVICE`, `REMASKING` and `THRESHOLD`. A flag on
+  the command line wins, an empty variable counts as unset, `--verbose` reports each value that came from a variable on
+  stderr, and a bad numeric value names its variable. `scripts/check_env.sh` drives the real binary through those rules
+  (CI and `ci-local.sh` run it), and `docs/cli.md` says which scripts need the variables unset.
+- Dream takes `--eps F`, the final timestep of its schedule (issue #30, pull request #283): 0.001 by default, at least 0
+  and below 1. LLaDA and DiffusionGemma refuse it. The schedule lives in `dream_transfer_probability` and
+  `dream_n_transfer`, so `origin` remasking and the top-k paths both follow it.
 
 ### Changed
 
+- DiffusionGemma's `dg-fixed-input-v1` comparison uses the reference's cached/unified
+  spread for each prompt and self-conditioning state. It checks the local reference
+  against the recorded calibration before evaluating candidate logits, verifies the
+  candidate receipt, and checks the model's absolute soft-cap. The calibration and
+  fault controls are in `bench/checks/2026-11-05-dg-sensitivity.json`.
+  `bench/check_dg_bound.py make-mutant --record` saves the changed tensor, sizes and hashes.
 - The mask token can no longer be sampled (issue #40, pull request #68): argmax, the softmax normalizer and Gumbel
   selection skip it, and the Gumbel draw for the skipped candidate is still consumed, so the random stream does not
   move. `--no-suppress-mask` restores the old behavior for parity experiments. On GPU, suppression turns the device
@@ -34,12 +62,28 @@ semantic versioning (0.y: minor bumps may break things).
 
 ### Fixed
 
+- DiffusionGemma refuses an untied `output.weight` and the seven per-block projection scales (`attn_q`, `attn_k`, `attn_v`,
+  `attn_output`, `ffn_gate`, `ffn_up`, `ffn_down`) by name (issue #170, pull request #293). llama.cpp applies them and this
+  loader ignores them, so such a file used to answer with wrong logits. `logits` now says how many tokens `--tokens` must
+  hold, and an unknown `--device` gets the same message in option validation and in dispatch.
+- The gemma4 tokenizer ends generation on the set llama.cpp builds (issue #171): `<eos>`, `<turn|>` and
+  `<|tool_response>` by their text, plus the ids under `tokenizer.ggml.eos_token_id`, `eot_token_id` and `eom_token_id`,
+  each once. A file whose `eos_token_id` is missing or names another token now stops at `<eos>` too. The special tokens
+  are sorted longest first with a stable merge sort instead of an insertion sort, which was quadratic in their number.
+  Neither change moves an id on the DiffusionGemma file.
 - The action-pin check fails when the TruffleHog `version` input in `secret-scan.yml` is not the release its pin comment
   names without the `v` (issue #146): a Dependabot bump moves the pin and leaves the scanner image tag behind. The
   workflow comments now say what runs: a push to main and the weekly run pass no base, so each scans the full history
-  that leads to the commit, not the working tree.
+  that leads to the commit, not the working tree. The check also refuses a TruffleHog step with no `version` input, whose
+  default is `latest`, and it reads the steps of composite actions under `.github/actions` as well as those of workflows.
+- `./mojo-dllm doctor` refuses any argument with exit 2 and runs no probe (issue #80, pull request #288): `doctor --jsno`
+  used to print the normal report and exit 0. `doctor -h` and `doctor --help` still print the help.
 - `--remasking origin` was refused before the model loaded: the accepted names listed five values and left out `origin`.
   `docs/cli.md` now says Dream takes all six names and LLaDA refuses `entropy`, `maskgit_plus`, `topk_margin` and `origin`.
+- `./mojo-dllm run` with the default `--device auto` no longer stops when `nvidia-smi` prints a line the launcher cannot
+  read (issue #81): like a missing, failing or timed-out `nvidia-smi`, it runs on the CPU and prints
+  `device: cpu (nvidia-smi failed: nvidia-smi printed a line the launcher cannot read: '...')`. `doctor` and `setup`
+  already went on with the CPU.
 
 ## [0.2.0] - 2026-11-10
 

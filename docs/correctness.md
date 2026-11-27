@@ -313,44 +313,359 @@ command line.
 
 The model file is 16.81 GB and mojo-dllm keeps its own repacked copy beside the
 mapping the reference holds, so the two never run together. `bench/parity.py`
-runs them in turns and compares saved files:
+runs them in turns and compares saved files.
 
 ```bash
 scripts/build_dg_ref.sh
 uv run --only-group fixtures python bench/parity.py --arch diffusion-gemma --phase ref \
-    --model models/diffusiongemma-26B-A4B-it-Q4_K_M.gguf --llama-src "$DG_LLAMA_SRC"
-# mojo-dllm writes build/dg-parity/<model>/caseN/<variant>.mojo.f32 (the forward pass is #64)
+    --model models/diffusiongemma-26B-A4B-it-Q4_K_M.gguf --llama-src "$DG_LLAMA_SRC" \
+    --model-provenance model-provenance.json
+# Export each candidate before comparing. For example, for case0 without self-conditioning:
+model=models/diffusiongemma-26B-A4B-it-Q4_K_M.gguf
+case_dir=build/dg-parity/diffusiongemma-26B-A4B-it-Q4_K_M/case0
+revision=$(build/mojo-dllm --version | sed -n 's/^commit: //p')
+uv run --only-group fixtures python bench/dg_candidate.py "$case_dir" --model "$model" \
+    --variant unified --candidate-revision "$revision" -- \
+    build/mojo-dllm logits --model '{model}' --path '{variant}' \
+    --tokens '{prompt_csv},{canvas_csv}' --rows '{rows_csv}' --out '{out}'
+
 uv run --only-group fixtures python bench/parity.py --arch diffusion-gemma --phase compare \
     --model models/diffusiongemma-26B-A4B-it-Q4_K_M.gguf
 ```
 
-Each `<variant>.mojo.f32` has a `<variant>.mojo.f32.json` beside it with the
-`case_sha256` of its case (`bench/parity.py` `dg_case_hash`: prompt, prompt tokens and canvas) and the
-`mojo_dllm_commit` of the build that wrote it. The comparison needs the cases
-`case0` to `case{N-1}` of the current prompt set and stops with a message while
-any mojo-dllm file or sidecar is missing, was written for another case, or comes
-from a different build than the others, and
-refuses a file that is byte-identical to the reference's. It writes evidence to
-`bench/parity/` only when every variant is no worse than the worst case of the
-LLaDA comparison in `bench/parity/2026-10-03-llada.json`, on each of minimum
-cosine, argmax agreement, top-5 overlap and maximum relative RMS. The bound is
-read from that file, not typed. A fifth metric holds the largest logit of every
-row to the same relative error as LLaDA's rows reach: the final soft-cap pins
-that logit near 30, so the first four cannot see the cap removed.
-`bench/check_dg_bound.py` shows what the bound rejects.
+The acceptance rule is `dg-fixed-input-v1`, a regression protocol for the four
+recorded prompt/canvas pairs, reference commit, GGUF identity and self-conditioning
+temperature. It derives a separate bound for each prompt and each SC state from
+the reference's cached/unified comparison **in both directions**. The five metrics
+are minimum cosine, argmax fraction, mean top-5 overlap, maximum relative RMS,
+and maximum relative error of the largest logit. The lower-bound metrics take
+the smaller observed value and the error metrics take the larger. Calibration
+uses the original reference controls with unit scale and zero margin. Every runtime variant must
+meet its case/state bound, and every logit must satisfy the model's absolute
+soft-cap of 30. The raw calibration records are
+`bench/checks/2026-11-05-dg-sensitivity.json`; the Python code derives its numbers
+from those controls each time.
 
-Each case records how far the reference lies from itself: the prompt K/V path
-against the unified pass, and the unified pass again with the previous-step
-logits changed by one part in a million. On the two LLaDA prompts with a random
-canvas those distances exceed the LLaDA bound (the one-in-a-million change moved
-the output by a median relative RMS of 0.18 to 0.26). No LLaDA spread was
-measured for comparison. The cause is untested: expert routing flips (8 of 128
-experts per token) carried to every row by bidirectional attention are a
-hypothesis. A failed comparison prints these distances beside the verdict. No
-DiffusionGemma result is recorded yet, so the tables above hold none.
+The four prompts are speculative decoding, diffusion versus autoregressive
+models, a prime-checking Python function, and a Chinese-to-English translation.
+The record includes every prompt/canvas token ID, seeds 66-69, the 256-token
+canvas, vocabulary size, and `prev_temp_inv=1.25`. The GGUF provenance names the
+Hugging Face repository, pinned revision and declared LFS object ID, with the
+download's verified byte count. A different input/model requires its own
+measurement. The calibration used eight CPU threads with repacking enabled on
+an AMD EPYC 9J14, with native AVX512 CPU kernels. `reference_configuration`
+records the CPU model, ISA, compiler flags and affinity. `source` records the
+reconstructed pinned build and the 403/403 compilation inputs checked against
+the pinned upstream content.
+The bounds apply to this recorded CPU and reference build. Each new `case.json`
+records the local reference CPU model and flags when available, and the thread
+count. Before comparing candidate logits, the comparator checks the local
+cached/unified spread for each self-conditioning state against that state's
+calibrated bounds. A reference outside those bounds stops the comparison.
+
+`bench/dg_candidate.py` executes the supplied candidate command without a shell
+and writes an execution receipt alongside each `*.mojo.f32`. Its argv template
+passes the model, variant, full case inputs, output path and, for SC, the shared
+original previous-step buffer and its temperature. Receipts bind those inputs
+to output contents and the executed binary/revision. The comparator verifies
+all receipts and expected output lengths before computing metrics. Each measured
+case/state has nonzero reference spread, so the protocol also refuses a candidate
+output that is byte-identical to the reference for its own variant. The receipt
+provides an audit trail for the candidate command and its inputs.
+The parity record uses the candidate revision recorded at export.
+The comparison requires `case0` through `case3`, in the measured prompt order,
+and one candidate build across all cases and variants. The historical
+LLaDA-bound checker uses `<variant>.mojo.f32.json` sidecars with a
+`case_sha256` and `mojo_dllm_commit`; the fixed-input protocol uses the fuller
+execution receipts described above. Starting a new reference run clears old
+candidate outputs, sidecars and receipts. A result is written atomically, and
+replacing an existing result requires `--force`.
+
+A pass establishes agreement with the measured envelope on these fixed inputs,
+including the model's soft-cap and execution-receipt checks. Correctness
+assessment also needs independent numerical checks and broader input coverage.
+A failure calls for investigation of the inputs, weights and arithmetic path.
+Both an implementation defect and a valid change in floating-point rounding can
+fall outside this empirical envelope. The previous-logit perturbation diagnostic
+shows how sensitive this model is to small input changes.
+
+### Reference sensitivity
+
+`bench/dg_sensitivity.py` runs four prompts without and with SC. Each case has
+unified and cached passes, independent repeats of both unified SC states, and
+an SC pass whose previous logits have a seeded relative perturbation of about
+1e-6. Same-path repeats had zero relative RMS in all eight comparisons. The
+table shows the bound derived from both directions of the cached/unified spread.
+The perturbation results quantify input sensitivity. Implementation tolerance
+comes from the same-input cached/unified controls.
+The traces in the reference path decision below locate the first cached/unified
+differences in layer 0, at the `1e-7` scale, in matrix dispatch and softmax
+arithmetic. How those differences grow to the logit distances in the table
+remains untraced. Changes in expert routing (8 of 128 experts per token) are one
+hypothesis for that growth and for the previous-logit perturbation.
+
+<!-- dg-sensitivity:start -->
+| Case | Prompt tokens | no-SC bound min cosine / max rel. RMS | SC bound min cosine / max rel. RMS | noisy-SC median rel. RMS |
+|---|---:|---:|---:|---:|
+| case0 | 8 | 0.91919 / 0.40245 | 0.82027 / 0.71433 | 0.25812 |
+| case1 | 14 | 0.94080 / 0.34426 | 0.94369 / 0.34135 | 0.20590 |
+| case2 | 14 | 0.88880 / 0.47999 | 0.92500 / 0.40011 | 0.20348 |
+| case3 | 23 | 0.96107 / 0.30512 | 0.97264 / 0.28693 | 0.14547 |
+
+| Fault injection | Rejected case/variant comparisons |
+|---|---:|
+| layer 15 output scale dropped | 16 / 16 |
+| soft-cap removed | 16 / 16 |
+<!-- dg-sensitivity:end -->
+
+Held-out runs on case0 used the frozen bounds above. A thread-count invariance
+check found that all four variants agreed bit for bit between four and eight threads.
+Two additional eight-thread unified passes used `dg_ref` rebuilt from PR #174
+for its `--no-repack` option. With repacking disabled, both fall outside the
+envelope. Their maximum relative RMS is 0.49618 without SC and 0.81689 with SC,
+against bounds of 0.40245 and 0.71433. These are valid reference runs with another
+weight arithmetic path. The observed rejections establish that the protocol's
+rounding coverage is configuration-dependent. Their complete commands, CPU
+configuration, inputs, metrics and verdicts are in
+`bench/checks/2026-11-10-dg-heldout.json`. The held-out records are evaluated
+separately from the cached/unified records that define the bounds.
+
+The 24 same-input calibration controls comprise the 16 cached/unified comparisons
+that define the bound and eight zero-error repeats. Each fault is detected on all
+16 case/variant pairs. A separate replay of the saved logits records the same
+verdicts in `bench/checks/2026-11-05-dg-rule-verification.json`.
+The guard-mutation results in `bench/checks/2026-11-05-dg-guard-mutations.json`
+apply to the code at `44773ed`.
+Fault detection requires a rejection somewhere in the suite;
+all positive controls must pass. The layer-15 mutant changes its output scale
+from 0.5234375 to 1.0. `bench/checks/2026-11-10-dg-mutant.json` records the
+tensor name, byte offset, before/after values, byte counts, hashes and the
+`make-mutant` output. The regenerated mutant matches the file used for the
+measurements, and the original model hash matches its declared Hugging Face LFS
+object ID. Its SC passes consume the original model's previous logits,
+which isolates the current forward pass. The soft-cap inverse promotes to f64
+before clipping to a representable value below one, including logits rounded
+exactly to either cap. The report also retains total-variation and
+Jensen-Shannon distances at temperature 0.8 as diagnostics. The acceptance rule
+uses the five calibrated metrics and the explicit cap invariant. For soft-cap
+removal, the cap invariant and largest-logit error detect the fault. The other
+four calibrated metrics stay within their bounds in all 16 comparisons.
+
+Run the calibration and fault check serially. The provenance files below use the
+same structure as the committed download and reconstructed-source records.
+
+```bash
+python - <<'PY'
+import json
+from pathlib import Path
+record = json.loads(Path("bench/checks/2026-11-05-dg-sensitivity.json").read_text())
+for filename, value in (
+    ("model-provenance.json", record["model_provenance"]),
+    ("source-manifest.json", record["source"]["manifest"]),
+    ("reference-verification.json", record["source"]["compilation_input_verification"]),
+):
+    Path(filename).write_text(json.dumps(value, indent=2) + "\n")
+PY
+python bench/dg_sensitivity.py --model "$MODEL" --ref build/dg_ref --llama-src "$DG_LLAMA_SRC" \
+    --model-provenance model-provenance.json --source-manifest source-manifest.json \
+    --threads 8 --out build/dg-study/original
+python bench/check_dg_bound.py make-mutant "$MODEL" --layer 15 --out build/layer15-dropped.gguf \
+    --record build/dg-study/mutant.json
+python bench/dg_sensitivity.py --model build/layer15-dropped.gguf --ref build/dg_ref \
+    --llama-src "$DG_LLAMA_SRC" --source-manifest source-manifest.json \
+    --threads 8 --out build/dg-study/dropped --original build/dg-study/original
+python bench/check_dg_bound.py analyze-sensitivity build/dg-study/original \
+    --dropped build/dg-study/dropped --dropped-layer 15 --out build/dg-study/sensitivity.json
+python bench/check_dg_bound.py attach-provenance build/dg-study/sensitivity.json \
+    --cases build/dg-study/original --dropped build/dg-study/dropped \
+    --model-provenance model-provenance.json --reference-verification reference-verification.json
+python bench/check_dg_bound.py check build/dg-study/original \
+    --dropped build/dg-study/dropped --dropped-layer 15 --out build/dg-study/check.json
+python bench/check_dg_bound.py render-sensitivity bench/checks/2026-11-05-dg-sensitivity.json
+```
+
+The initial study used 44 full-model reference forwards, and the held-out checks
+add six. The runtime forward
+pass and its resulting parity record remain the #64 work.
 
 The tokenizer goldens in `tests/fixtures/gemma4-tokenizer-golden.tsv` fix the
 encoding, and `tests/test_tokenizer_gemma4.mojo` checks the Mojo tokenizer against
 them. Decoding the ids through the GGUF vocabulary restores 53 of the
 54 strings; the string holding a literal U+2581 does not come back, because
 decoding turns every U+2581 into a space.
+
+### Reference path decision
+
+The comparator chosen for the cached forward in #64 is the prompt K/V path,
+selected with `dg_ref logits --cached`, matching its prefill-once execution.
+Its real-file results should name that mode. This choice departs from the
+reference tool's default unified pass. Numerical tolerance must account for
+the measured cached/unified spread in both directions, whichever path is
+selected as comparator. Each runtime variant still needs to meet its bound.
+The cached and unified paths implement the same forward equations. Both agree
+with an independent complete f32 forward on the tiny model. Real-model traces
+identify shape-dependent arithmetic in the Q/K projections and the prompt
+softmax. The projection oracle's relative RMS resolution, up to `2.8e-7`, is
+comparable to the `2.2e-7` to `3.1e-7` gap between the paths, so this evidence
+supports both as comparators at that resolution. Selecting cached retains the
+full observed numerical spread for comparisons with a Mojo implementation.
+
+The measurements used recorded base `a34de8618b25dfc32ee43749db47d767a9f0a25d`
+with an overlay of the pinned CPU compilation inputs. All 403 compilation
+inputs were compared with their pinned GitHub contents and matched. The
+source manifest and verification are recorded in
+`bench/checks/2026-11-05-dg-reference-source.json`.
+
+At the pinned commit `2e715c0639c6f07c57c943f8d5a7919953af8f7c`, unified prompt
+queries attend causally over prompt keys. Canvas queries see the same prompt
+and canvas keys as the decode mask, including the last `window - 1` prompt
+keys in sliding layers. The embedding normalization and encoder/decoder
+scalars also match by region. Prompt rows are independent of canvas rows, so
+their per-layer K/V can be computed once. The non-flash cached store retains
+those values in f32, and decode uses the same absolute canvas positions.
+[Pinned model, mask and phase handling](https://github.com/danielhanchen/llama.cpp/blob/2e715c0639c6f07c57c943f8d5a7919953af8f7c/src/models/diffusion-gemma.cpp#L18-L212)
+[Pinned graph](https://github.com/danielhanchen/llama.cpp/blob/2e715c0639c6f07c57c943f8d5a7919953af8f7c/src/models/diffusion-gemma.cpp#L339-L587)
+[Pinned caller](https://github.com/danielhanchen/llama.cpp/blob/2e715c0639c6f07c57c943f8d5a7919953af8f7c/examples/diffusion/diffusion.cpp#L489-L572)
+
+The 2026-11-05 measurements use an AMD EPYC 9J14 CPU build with flash attention
+and self-conditioning disabled. At `P=9`, the initial region embeddings and
+first-layer attention-normalized inputs are bit-identical in both paths.
+The first differing tensors are the Q4_K Q and K projections, at
+`gemma4-common.h` lines 22 and 46. Their differing global rows are 8 and 264.
+The Q6_K V projection remains bit-identical. Observing graph nodes through
+the evaluation callback preserves every final-logit bit for both paths.
+[Pinned projections](https://github.com/danielhanchen/llama.cpp/blob/2e715c0639c6f07c57c943f8d5a7919953af8f7c/src/models/gemma4-common.h#L22-L51)
+
+The source of this first difference is the repacked CPU matrix product.
+`ggml-cpu/repack.cpp` lines 4637-4646 send complete groups of four input rows
+to GEMM and the remaining rows to GEMV. Lines 4697-4704 also distinguish
+four-row activation packing from single-row packing. With `P=9`, prompt row
+8 belongs to a GEMM group in the unified pass and becomes the prefill's GEMV
+tail. Global row 264 is the unified pass's GEMV tail and belongs to a complete
+GEMM group in the 256-row decode. The two kernels accumulate Q4_K products in
+different floating-point orders.
+[Pinned CPU dispatch](https://github.com/danielhanchen/llama.cpp/blob/2e715c0639c6f07c57c943f8d5a7919953af8f7c/ggml/src/ggml-cpu/repack.cpp#L4637-L4705)
+[Pinned x86 GEMV](https://github.com/danielhanchen/llama.cpp/blob/2e715c0639c6f07c57c943f8d5a7919953af8f7c/ggml/src/ggml-cpu/arch/x86/repack.cpp#L1464)
+[Pinned x86 GEMM](https://github.com/danielhanchen/llama.cpp/blob/2e715c0639c6f07c57c943f8d5a7919953af8f7c/ggml/src/ggml-cpu/arch/x86/repack.cpp#L2042)
+
+`tools/ref/dg_matmul.cpp` replays that Q projection using only its original
+GGUF weight bytes and the traced f32 input. With `CPU_REPACK q4_K_8x8`, its
+one-thread result reproduces the real graph tensor bit for bit. Splitting
+the same matrix inputs at the following prompt lengths gives the measured
+four-row period. Disabling CPU repacking removes every difference in this
+isolated product.
+
+| Prompt rows | Differing global rows, repacked Q projection | Maximum absolute difference | Ordinary CPU buffer |
+|---:|---|---:|---|
+| 8 | none | 0 | bit-identical |
+| 9 | 8, 264 | 0.0000610352 | bit-identical |
+| 12 | none | 0 | bit-identical |
+| 14 | 12, 13, 268, 269 | 0.0000915527 | bit-identical |
+| 16 | none | 0 | bit-identical |
+
+The period describes this projection. The complete model on this EPYC also
+differs at `P=8`, while #163's earlier measurement reported equality at
+8 and 16. The full-model measurements below use the first standard prompt
+and canvas seed 66 for `P=8`, and the second prompt and canvas seed 67 for
+the other lengths. `P=9` uses its first nine IDs. `P=16` appends IDs
+`[2, 1613]` to its 14 IDs. Each row compares cached with unified on identical
+inputs, using the metrics from `bench/check_dg_bound.py`.
+
+| Prompt rows | CPU weight buffer | Minimum cosine | Maximum relative RMS | Same argmax |
+|---:|---|---:|---:|---:|
+| 8 | repacking enabled | 0.919194 | 0.402452 | 255 / 256 |
+| 9 | repacking enabled | 0.947347 | 0.325038 | 170 / 256 |
+| 14 | repacking enabled | 0.940799 | 0.344264 | 152 / 256 |
+| 16 | repacking enabled | 1.000000 | 0 | 256 / 256 |
+| 9 | repacking disabled | 0.905604 | 0.424862 | 152 / 256 |
+| 14 | repacking disabled | 0.935752 | 0.353081 | 156 / 256 |
+
+Disabling repacking removes the isolated Q projection difference and leaves
+further differences in the complete model. Additional traces at `P=9`
+with repacking disabled, and at `P=8` with repacking enabled, identify their
+first prompt difference at the first layer's `kq_soft_max` node. Q/K/V
+projections, head normalization, RoPE and raw attention scores are
+bit-identical before it. The prompt softmax differs by `1.1920929e-7`.
+For canvas rows, the first differing traced node is `ffn_moe_gate_up-0` at `P=9`
+without repacking, and `l_out-1` at `P=8` with repacking.
+The original repacked
+`P=9` trace grows to a first-layer canvas-output error of `0.00931`.
+
+This second source is the CPU softmax's SIMD width. `ggml-cpu/vec.cpp`
+lines 628-644 use 16-lane vector exponentials and f32 block reductions
+under AVX512F/DQ, or eight lanes under AVX2/FMA. Lines 694-698 handle the
+remaining values with scalar `expf` and individual accumulation. The
+EPYC build uses `-march=native` with AVX512F/DQ enabled. A prefill key axis
+of 8, 9 or 14 therefore uses scalar exponentials, while the unified axis
+of 264, 265 or 270 uses the 16-lane path for the same allowed prompt keys.
+Masked canvas keys contribute zero after exponentiation. At `P=16`, both
+shapes use the vector path for all allowed prompt keys. The AVX2/FMA
+eight-lane branch is a hypothesis for #163's earlier 8/16-aligned boundary
+pattern. That report omits the earlier machine's compiler flags, and these
+measurements use AVX512F/DQ.
+[Pinned softmax SIMD and tail](https://github.com/danielhanchen/llama.cpp/blob/2e715c0639c6f07c57c943f8d5a7919953af8f7c/ggml/src/ggml-cpu/vec.cpp#L625-L699)
+[Pinned softmax normalization](https://github.com/danielhanchen/llama.cpp/blob/2e715c0639c6f07c57c943f8d5a7919953af8f7c/ggml/src/ggml-cpu/ops.cpp#L5873-L5881)
+
+`bench/check_dg_softmax.py` isolates this operation using the traced scores
+and a causal mask. Increasing only its key axis from 8 or 9 to 16, with
+every extra key masked, reproduces the difference. The short and full
+shapes reproduce the corresponding graph tensors bit for bit. Against
+an independent NumPy float64 softmax, the maximum absolute error is
+`3.572e-8` for the short shapes and `1.235e-7` for the full shapes. All
+four additional traced final-logit files match their untraced runs byte
+for byte.
+
+`bench/check_dg_projection.py` independently dequantizes the first layer's
+Q/K/V weights with the GGUF Python package and accumulates their products in
+NumPy float64. It checks five input rows, including both differing boundary
+rows. With the pinned Q8_K activation rounding, the largest relative RMS
+errors against that oracle are `2.762e-7` for unified and `2.301e-7` for
+cached. Each path stays close to the same quantized matrix product.
+
+`bench/check_dg_tiny_paths.py` checks the complete forward equations on the
+existing two-layer random fixture. It writes the fixture's dequantized
+weights to a temporary 10.15 MiB f32 GGUF and uses a synthetic vocabulary
+for its preselected token IDs. At prompt lengths 8, 9, 14 and 16, both
+reference paths agree with `scripts/dg_numpy.py` using `quant=False` on all
+64 canvas argmaxes and every top-5 set. Across both paths the minimum cosine
+is `0.999999881811` and maximum relative RMS is `0.000486239`.
+
+The evidence is `bench/checks/2026-11-05-dg-reference-paths.json`. It records
+the exact real-model tokens, per-layer trace summaries, independent
+projection results, isolated matrix and softmax replay, and complete
+tiny-f32 results.
+The real-model independent oracle covers the first differing projections,
+while the complete independent forward uses the tiny model. The mode choice
+therefore follows the cached execution being implemented. Numerical
+comparisons retain their explicit CPU mode and measured error metrics.
+
+The native CPU-tool tests require `DG_REF` and `DG_MATMUL` to point at
+built executables. CI leaves those variables unset and skips those tests.
+The `native_controls` in `bench/checks/2026-11-05-dg-reference-path-mutations.json`
+record eight passing native tests before and after the mutation run. That
+record predates the nonpositive block-size guard in `dg_matmul`.
+The Python trace and diagnostic tests run in `scripts/run_extra_group_tests.sh`
+with the fixtures group's NumPy. That step rejects any skip. The test-only
+group and native-tool skips are listed with their reasons in
+`tests/python/allowed-skips.txt`.
+The diagnostic mutation outcomes and their pytest output are recorded together
+in `bench/checks/2026-11-16-dg-diagnostic-mutations.json`.
+
+Build both reference tools against the same pinned CPU libraries, then
+run the diagnostics with new output directories.
+
+```bash
+scripts/build_dg_ref.sh
+build/dg_ref logits "$MODEL" "$PROMPT_CSV" "$CANVAS_CSV" unified.f32 8 \
+    --trace-dir trace-unified --trace-only inp_region,attn_norm-0,Qcur-0,Kcur-0,Vcur-0,attn_out-0,ffn_moe_logits-0,l_out
+build/dg_ref logits "$MODEL" "$PROMPT_CSV" "$CANVAS_CSV" cached.f32 8 --cached \
+    --trace-dir trace-cached --trace-only inp_region,attn_norm-0,Qcur-0,Kcur-0,Vcur-0,attn_out-0,ffn_moe_logits-0,l_out
+uv run --only-group fixtures python bench/compare_dg_traces.py trace-unified trace-cached --prompt 9 --out trace.json
+uv run --only-group fixtures python bench/check_dg_projection.py "$MODEL" trace-unified trace-cached --prompt 9 --out projection.json
+uv run --only-group fixtures python bench/check_dg_matmul.py "$MODEL" trace-unified --prompt 9 --matmul build/dg_matmul --out-dir matrix-replay
+uv run --only-group fixtures python bench/check_dg_tiny_paths.py --ref build/dg_ref --out-dir tiny-f32-paths
+# For the softmax replay, repeat the trace commands with --no-repack,
+# add kq-0,kq_soft_max-0 to --trace-only, and use fresh trace directories.
+uv run --only-group fixtures python bench/check_dg_softmax.py trace-unified-plain trace-cached-plain \
+    --prompt 9 --llama-bin "$DG_LLAMA_SRC/build/bin" --out softmax.json
+```

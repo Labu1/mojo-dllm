@@ -34,7 +34,7 @@ class DgMetrics(Metrics):
 
 
 class Bound(TypedDict):
-    """The bound a DiffusionGemma comparison must stay inside, taken from the LLaDA evidence."""
+    """The five metric limits for a DiffusionGemma comparison."""
 
     min_cosine: float
     argmax_fraction: float

@@ -314,6 +314,23 @@ def test_refuses_a_negative_softcap() raises:
     _refuses("softcap-negative", A + "final_logit_softcapping")
 
 
+def test_refuses_an_untied_output_head() raises:
+    _refuses("unsupported-output.weight", "output.weight")
+
+
+def test_refuses_unsupported_projection_scales() raises:
+    for name in [
+        "blk.1.attn_q.scale",
+        "blk.1.attn_k.scale",
+        "blk.0.attn_v.scale",
+        "blk.1.attn_output.scale",
+        "blk.1.ffn_gate.scale",
+        "blk.1.ffn_up.scale",
+        "blk.1.ffn_down.scale",
+    ]:
+        _refuses("unsupported-" + name, name)
+
+
 def test_refuses_a_global_layer_with_attn_v() raises:
     _refuses("global-with-attn-v", "blk.1.attn_v.weight")
     _refuses("global-with-attn-v", A + "attention.sliding_window_pattern")

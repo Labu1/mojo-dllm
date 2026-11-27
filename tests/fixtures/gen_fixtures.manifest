@@ -75,6 +75,14 @@ diffusion-gemma/shared-kv-layers.gguf
 diffusion-gemma/sliding-without-attn-v.gguf
 diffusion-gemma/softcap-negative.gguf
 diffusion-gemma/thin-valid.gguf
+diffusion-gemma/unsupported-blk.0.attn_v.scale.gguf
+diffusion-gemma/unsupported-blk.1.attn_k.scale.gguf
+diffusion-gemma/unsupported-blk.1.attn_output.scale.gguf
+diffusion-gemma/unsupported-blk.1.attn_q.scale.gguf
+diffusion-gemma/unsupported-blk.1.ffn_down.scale.gguf
+diffusion-gemma/unsupported-blk.1.ffn_gate.scale.gguf
+diffusion-gemma/unsupported-blk.1.ffn_up.scale.gguf
+diffusion-gemma/unsupported-output.weight.gguf
 diffusion-gemma/value-length-swa.gguf
 diffusion-gemma/value-length-wide.gguf
 diffusion-gemma/value-length.gguf
