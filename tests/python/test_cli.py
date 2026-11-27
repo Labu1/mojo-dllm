@@ -51,6 +51,10 @@ def test_help_lists_every_command_and_the_environment() -> None:
     assert "--version" in text
 
 
+def test_help_names_the_prompt_file_option() -> None:
+    assert './mojo-dllm run --prompt-file PATH ("-" reads stdin)' in cli.help_text(Style(False))
+
+
 def test_help_has_no_colour_when_disabled_and_some_when_enabled() -> None:
     assert "\x1b[" not in cli.help_text(Style(False))
     assert "\x1b[" in cli.help_text(Style(True))
